@@ -56,19 +56,33 @@ app.use(cors({ origin: true }));
 app.use(express.json({ limit: '10kb' }));
 
 // Rate limiting (use if available, otherwise no-op passthrough)
-const globalLimiter = rateLimitPkg ? rateLimitPkg({ windowMs: 15 * 60 * 1000, max: 1000 }) : (req, res, next) => next();
-const authLimiter = rateLimitPkg ? rateLimitPkg({ windowMs: 60 * 1000, max: 10 }) : (req, res, next) => next();
+const globalLimiter = rateLimitPkg
+  ? rateLimitPkg({
+      windowMs: 15 * 60 * 1000,
+      max: 1000,
+      // respond with JSON so client can parse errors consistently
+      handler: (req, res) => res.status(429).json({ success: false, message: 'Too many requests, please try again later.' }),
+    })
+  : (req, res, next) => next();
+// authLimiter kept stricter but more lenient for development; returns JSON on limit
+const authLimiter = rateLimitPkg
+  ? rateLimitPkg({
+      windowMs: 60 * 1000,
+      max: 30,
+      handler: (req, res) => res.status(429).json({ success: false, message: 'Too many requests to auth endpoints, please wait a moment.' }),
+    })
+  : (req, res, next) => next();
 
 app.use(globalLimiter);
 
 // Mount auth routes with a stricter limiter
 app.use('/api/auth', authLimiter, authRoutes);
 
-// Mount user routes (orders, wallet, history)
-app.use('/api/user', authLimiter, userRoutes);
+// Mount user routes (orders, wallet, history) with global limiter
+app.use('/api/user', globalLimiter, userRoutes);
 
 // Admin routes
-app.use('/api/admin', authLimiter, adminRoutes);
+app.use('/api/admin', globalLimiter, adminRoutes);
 
 app.get('/', (req, res) => {
   res.send('API running...');
