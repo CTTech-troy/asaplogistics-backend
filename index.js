@@ -53,7 +53,14 @@ if (hppPkg) app.use(hppPkg());
 // Logging (only in development)
 if (process.env.NODE_ENV !== 'production' && morganPkg) app.use(morganPkg('dev'));
 
-app.use(cors({ origin: true }));
+app.use(cors({ 
+  origin: [
+    'http://localhost:5173', 
+    'https://your-frontend-domain.netlify.app',
+    'https://asaplogis.netlify.app/'
+  ],
+  credentials: true 
+}));
 // Allow configurable JSON body size for endpoints that may accept larger form data.
 // Default is 100kb; override with CONTACT_MAX_BODY_KB in .env (value in KB).
 const contactMaxKb = Number(process.env.CONTACT_MAX_BODY_KB) || 100;
