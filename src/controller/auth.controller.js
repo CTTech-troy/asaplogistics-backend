@@ -220,6 +220,93 @@ export const login = async (req, res) => {
   }
 };
 
+// ================= LOGIN WITH PASSWORD =================
+export const loginWithPassword = async (req, res) => {
+  try {
+    const { phone, password, rememberMe } = req.body;
+
+    if (!phone || String(phone).trim().length < 10) {
+      return res.status(400).json({ message: 'Valid phone number is required' });
+    }
+    if (!password || String(password).length === 0) {
+      return res.status(400).json({ message: 'Password is required' });
+    }
+
+    // Get client IP for remember me
+    const clientIp = req.headers['x-forwarded-for']?.split(',')[0].trim() || 
+                     req.socket?.remoteAddress || 
+                     req.connection?.remoteAddress || 
+                     'unknown';
+
+    // Look up user document by phone in Firestore to avoid depending on
+    // admin.auth network lookup (which can fail with DNS/proxy issues).
+    const usersRef = admin.firestore().collection('users');
+    const qSnap = await usersRef.where('phone', '==', phone).limit(1).get();
+    if (qSnap.empty) {
+      // Do not reveal whether phone exists
+      return res.status(401).json({ message: 'Invalid phone number or password' });
+    }
+    const userDoc = qSnap.docs[0];
+    const userData = userDoc.data();
+    const uid = userData.uid || userDoc.id;
+    const passwordHash = userData?.passwordHash;
+
+    if (!passwordHash) {
+      return res.status(401).json({ message: 'Invalid phone number or password' });
+    }
+
+    // Verify password using bcrypt
+    const passwordMatch = await bcryptjs.compare(password, passwordHash);
+    if (!passwordMatch) {
+      console.warn(`[LOGIN PASSWORD] Failed login attempt for user ${user.uid} from IP ${clientIp}`);
+      return res.status(401).json({ message: 'Invalid phone number or password' });
+    }
+
+    // Check if user is logging in from a trusted IP (remember me feature)
+    if (userData.rememberMe && userData.trustedIps && userData.trustedIps.includes(clientIp)) {
+      console.log(`✓ [LOGIN PASSWORD] Auto-login from trusted IP ${clientIp} for user ${uid}`);
+    }
+
+    // Create session token
+    const sessionToken = `sess_${makeDebugId()}`;
+    const trustedIps = [...(userData.trustedIps || [])];
+    if (rememberMe && !trustedIps.includes(clientIp)) {
+      trustedIps.push(clientIp);
+    }
+
+    try {
+      await admin.firestore().doc(`users/${uid}`).set({
+        currentSession: sessionToken,
+        sessionIssuedAt: Date.now(),
+        lastLoginIp: clientIp,
+        lastLoginAt: Date.now(),
+        rememberMe: rememberMe === true,
+        trustedIps: rememberMe ? trustedIps : [],
+      }, { merge: true });
+    } catch (e) {
+      console.error('Failed to persist login session', e);
+    }
+
+    console.log(`✓ [LOGIN PASSWORD] User ${uid} logged in successfully from IP ${clientIp}`);
+
+    res.status(200).json({
+      success: true,
+      message: 'Login successful',
+      uid,
+      sessionToken,
+      user: {
+        uid,
+        email: userData.email,
+        displayName: userData.fullName || userData.displayName,
+      },
+    });
+  } catch (error) {
+    console.error(`✗ [LOGIN PASSWORD] Error:`, error && error.message ? error.message : error);
+    // Return generic message to avoid leaking internals
+    return res.status(401).json({ message: 'Invalid phone number or password' });
+  }
+};
+
 // ================= VERIFY OTP =================
 export const verifyOtp = async (req, res) => {
   try {

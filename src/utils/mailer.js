@@ -18,11 +18,33 @@ try {
         user: SMTP_USER,
         pass: SMTP_PASS,
       },
+      // Enable detailed logging for SMTP debugging
+      logger: true,
+      debug: true,
     });
+
+    // Log SMTP connection events
+    transporter.verify((err, success) => {
+      if (err) {
+        console.error('[Mailer] SMTP connection test failed:', err.message);
+      } else if (success) {
+        console.log('[Mailer] SMTP connection verified successfully');
+      }
+    });
+
     smtpConfigured = true;
-    console.log('[Mailer] SMTP configured successfully for', SMTP_USER);
+    console.log('[Mailer] SMTP configured:', {
+      host: SMTP_HOST,
+      port: parseInt(SMTP_PORT || '587', 10),
+      user: SMTP_USER,
+      secure: SMTP_PORT === '465' ? 'SSL' : 'TLS',
+    });
   } else {
-    console.warn('[Mailer] SMTP not configured. Missing SMTP_HOST, SMTP_USER, or SMTP_PASS in .env');
+    console.warn('[Mailer] SMTP not configured. Missing:', {
+      SMTP_HOST: !SMTP_HOST,
+      SMTP_USER: !SMTP_USER,
+      SMTP_PASS: !SMTP_PASS,
+    });
   }
 } catch (err) {
   console.error('[Mailer] Failed to import nodemailer:', err.message);
@@ -89,7 +111,7 @@ function getOtpEmailHtml(otp) {
 }
 
 /**
- * Send OTP via email with HTML template
+ * Send OTP via email with HTML template and detailed logging
  */
 export async function sendOtpByEmail({ to, otp }) {
   if (!to || !otp) {
@@ -101,21 +123,45 @@ export async function sendOtpByEmail({ to, otp }) {
   const html = getOtpEmailHtml(otp);
   const text = `Your 4-digit verification code is: ${otp}\nIt expires in 5 minutes.`;
 
+  const mailOptions = {
+    from,
+    to,
+    subject,
+    text,
+    html,
+  };
+
   try {
-    const result = await transporter.sendMail({
+    console.log('[Mailer] Attempting to send OTP email:', {
       from,
       to,
       subject,
-      text,
-      html,
+      timestamp: new Date().toISOString(),
+      smtpConfigured,
     });
 
+    const result = await transporter.sendMail(mailOptions);
+
     if (smtpConfigured) {
-      console.log('[Mailer] OTP email sent successfully to', to, '- Message ID:', result.messageId);
+      console.log('[Mailer] ✓ OTP email sent successfully:', {
+        to,
+        messageId: result.messageId,
+        response: result.response,
+        timestamp: new Date().toISOString(),
+      });
+    } else {
+      console.log('[Mailer] [FALLBACK MODE] OTP logged to console (SMTP not configured)');
     }
     return true;
   } catch (err) {
-    console.error('[Mailer] Failed to send OTP email to', to, '-', err.message);
+    console.error('[Mailer] ✗ Failed to send OTP email:', {
+      to,
+      errorCode: err.code,
+      errorMessage: err.message,
+      errorCommand: err.command,
+      errorResponse: err.response,
+      timestamp: new Date().toISOString(),
+    });
     throw err;
   }
 }
