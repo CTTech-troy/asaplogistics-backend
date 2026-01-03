@@ -5,6 +5,7 @@ import dotenv from 'dotenv';
 import authRoutes from './src/router/auth.route.js';
 import userRoutes from './src/router/user.route.js';
 import adminRoutes from './src/router/admin.route.js';
+import contactRoutes from './src/router/contact.route.js';
 
 dotenv.config();
 
@@ -53,7 +54,10 @@ if (hppPkg) app.use(hppPkg());
 if (process.env.NODE_ENV !== 'production' && morganPkg) app.use(morganPkg('dev'));
 
 app.use(cors({ origin: true }));
-app.use(express.json({ limit: '10kb' }));
+// Allow configurable JSON body size for endpoints that may accept larger form data.
+// Default is 100kb; override with CONTACT_MAX_BODY_KB in .env (value in KB).
+const contactMaxKb = Number(process.env.CONTACT_MAX_BODY_KB) || 100;
+app.use(express.json({ limit: `${contactMaxKb}kb` }));
 
 // Rate limiting (use if available, otherwise no-op passthrough)
 const globalLimiter = rateLimitPkg
@@ -83,6 +87,9 @@ app.use('/api/user', globalLimiter, userRoutes);
 
 // Admin routes
 app.use('/api/admin', globalLimiter, adminRoutes);
+
+// Public contact form endpoint
+app.use('/api/contact', globalLimiter, contactRoutes);
 
 app.get('/', (req, res) => {
   res.send('API running...');
