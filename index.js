@@ -57,7 +57,7 @@ app.use(cors({
   origin: [
     'http://localhost:5173', 
     'https://your-frontend-domain.netlify.app',
-    'https://asaplogis.netlify.app/'
+    'https://asaplogis.netlify.app'
   ],
   credentials: true 
 }));
