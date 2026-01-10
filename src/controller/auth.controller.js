@@ -159,9 +159,10 @@ export const signup = async (req, res) => {
 
       res.status(201).json({
         success: true,
-        message: "Signup successful. OTP sent to your email.",
+        message: emailSent ? "Signup successful. OTP sent to your email." : "Signup successful but email could not be sent. Check console for OTP.",
         uid: user.uid,
         email: email,
+        emailSent: emailSent,
       });
     } catch (authErr) {
       // Handle specific Firebase Auth errors

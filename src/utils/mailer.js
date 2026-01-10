@@ -1,62 +1,48 @@
 import dotenv from 'dotenv';
+import { Resend } from 'resend';
+
 dotenv.config();
-const { SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, EMAIL_FROM, NODE_ENV } = process.env;
 
-let transporter;
-let smtpConfigured = false;
+const { RESEND_API_KEY, NODE_ENV } = process.env;
 
-// Enforce SMTP-only mail sending. Nodemailer must be installed and SMTP_* env vars provided.
+let resend;
+let mailConfigured = false;
+
+// Initialize Resend client
 try {
-  const { createTransport } = await import('nodemailer');
-  if (!SMTP_HOST || !SMTP_USER || !SMTP_PASS) {
-    const msg = '[Mailer] SMTP not configured. Please set SMTP_HOST, SMTP_USER and SMTP_PASS in environment.';
+  if (!RESEND_API_KEY) {
+    const msg = '[Mailer] RESEND_API_KEY not configured in environment.';
     if (NODE_ENV === 'production') {
       console.error(msg);
-      throw new Error('SMTP is required in production');
+      throw new Error('RESEND_API_KEY is required in production');
     } else {
       console.warn(msg);
     }
   } else {
-    transporter = createTransport({
-      host: SMTP_HOST,
-      port: parseInt(SMTP_PORT || '587', 10),
-      secure: String(SMTP_PORT) === '465',
-      auth: {
-        user: SMTP_USER,
-        pass: SMTP_PASS,
-      },
-      tls: {
-        // allow self-signed certificates when explicitly disabled in prod; default to true for production security
-        rejectUnauthorized: process.env.SMTP_REJECT_UNAUTHORIZED !== 'false',
-      },
-    });
-
-    // Verify transporter connection and throw in production on failure
-    try {
-      await transporter.verify();
-      smtpConfigured = true;
-      console.log('[Mailer] SMTP connection verified');
-    } catch (verifyErr) {
-      console.error('[Mailer] SMTP verification failed:', verifyErr && verifyErr.message ? verifyErr.message : verifyErr);
-      if (NODE_ENV === 'production') throw verifyErr;
-    }
+    resend = new Resend(RESEND_API_KEY);
+    mailConfigured = true;
+    console.log('[Mailer] ✓ Resend initialized successfully');
   }
 } catch (err) {
-  console.error('[Mailer] Failed to initialize SMTP transporter:', err && err.message ? err.message : err);
-  // In non-production allow fallback to console logger
-  if (!transporter) {
-    transporter = {
-      sendMail: async (msg) => {
+  console.error('[Mailer] Failed to initialize Resend:', err && err.message ? err.message : err);
+  if (NODE_ENV === 'production') {
+    throw err;
+  }
+  // Fallback to console logger in dev
+  resend = {
+    emails: {
+      send: async (msg) => {
         console.log('\n=== [MAILER FALLBACK - DEV MODE] ===');
+        console.log('From:', msg.from);
         console.log('To:', msg.to);
         console.log('Subject:', msg.subject);
         console.log('---');
         console.log(msg.text || msg.html);
         console.log('===================================\n');
-        return Promise.resolve({ fallback: true });
+        return Promise.resolve({ fallback: true, id: 'dev-' + Date.now() });
       },
-    };
-  }
+    },
+  };
 }
 
 /**
@@ -105,7 +91,7 @@ function getOtpEmailHtml(otp) {
 }
 
 /**
- * Send OTP via email with HTML template and detailed logging
+ * Send OTP via Resend email API (instant delivery, no SMTP delays)
  */
 export async function sendOtpByEmail({ to, otp }) {
   if (!to || !otp) {
@@ -119,40 +105,32 @@ export async function sendOtpByEmail({ to, otp }) {
   console.log(`[OTP] Expires: 5 minutes`);
   console.log(`${'='.repeat(50)}\n`);
 
-  // Ensure FROM matches authenticated SMTP account to avoid Gmail rejections.
-  const from = EMAIL_FROM || (SMTP_USER ? `ASAP Logistics <${SMTP_USER}>` : 'noreply@asaplogistics.com');
-  const replyTo = SMTP_USER || EMAIL_FROM || 'noreply@asaplogistics.com';
   const subject = 'Your ASAP Logistics Verification Code';
   const html = getOtpEmailHtml(otp);
   const text = `Your 4-digit verification code is: ${otp}\nIt expires in 5 minutes.`;
 
-  const mailOptions = {
-    from,
-    to,
-    subject,
-    text,
-    html,
-    replyTo,
-  };
-
   try {
-    console.log('[Mailer] Attempting to send OTP email:', { from, to, subject, timestamp: new Date().toISOString(), smtpConfigured });
+    console.log('[Mailer] Attempting to send OTP via Resend:', { to, subject, timestamp: new Date().toISOString(), mailConfigured });
 
-    // Send via SMTP transporter (nodemailer)
-    const result = await transporter.sendMail(mailOptions);
-    if (smtpConfigured) {
-      console.log('[Mailer] ✓ OTP email sent successfully:', { to, messageId: result.messageId, response: result.response, timestamp: new Date().toISOString() });
+    // Send via Resend API
+    const result = await resend.emails.send({
+      from: 'ASAP Logistics <onboarding@resend.dev>',
+      to,
+      subject,
+      html,
+      text,
+    });
+
+    if (mailConfigured) {
+      console.log('[Mailer] ✓ OTP email sent successfully via Resend:', { to, messageId: result.id, timestamp: new Date().toISOString() });
     } else {
-      console.log('[Mailer] [FALLBACK MODE] OTP logged to console (SMTP not configured)');
+      console.log('[Mailer] [FALLBACK MODE] OTP logged to console (Resend not configured)');
     }
     return true;
   } catch (err) {
     console.error('[Mailer] ✗ Failed to send OTP email:', {
       to,
-      errorCode: err.code,
       errorMessage: err.message,
-      errorCommand: err.command,
-      errorResponse: err.response,
       timestamp: new Date().toISOString(),
     });
     throw err;

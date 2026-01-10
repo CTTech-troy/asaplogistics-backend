@@ -16,15 +16,14 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@sendgrid/mail": "^8.1.6",
-    "nodemailer": "^6.9.4",
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",
     "dotenv": "^16.6.1",
     "express": "^4.22.1",
     "firebase-admin": "^13.6.0",
     "jsonwebtoken": "^8.5.1",
-    "mongoose": "^8.0.0"
+    "mongoose": "^8.0.0",
+    "resend": "^3.5.0"
   },
   "optionalDependencies": {
     "express-rate-limit": "^6.11.2",
