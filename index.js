@@ -6,6 +6,7 @@ import authRoutes from './src/router/auth.route.js';
 import userRoutes from './src/router/user.route.js';
 import adminRoutes from './src/router/admin.route.js';
 import contactRoutes from './src/router/contact.route.js';
+import referralRoutes from './src/router/referral.route.js';
 
 dotenv.config();
 
@@ -92,6 +93,9 @@ app.use('/api/auth', authLimiter, authRoutes);
 // Mount user routes (orders, wallet, history) with global limiter
 app.use('/api/user', globalLimiter, userRoutes);
 
+// Mount referral routes
+app.use('/api/referral', globalLimiter, referralRoutes);
+
 // Admin routes
 app.use('/api/admin', globalLimiter, adminRoutes);
 
@@ -102,5 +106,25 @@ app.get('/', (req, res) => {
   res.send('API running...');
 });
 
+// Development-only test endpoint to send a test OTP/email.
+// Dynamic import used so server won't fail on startup if mailer is misconfigured in production.
+if (process.env.NODE_ENV !== 'production') {
+  app.post('/dev/test-email', async (req, res) => {
+    try {
+      const to = req.body?.to || req.query?.to;
+      if (!to) return res.status(400).json({ success: false, message: 'Missing `to` email param' });
+      const { sendOtpByEmail } = await import('./src/utils/mailer.js');
+      const otp = String(Math.floor(1000 + Math.random() * 9000));
+      await sendOtpByEmail({ to, otp });
+      return res.status(200).json({ success: true, message: 'Test OTP email sent', to });
+    } catch (err) {
+      console.error('[DEV TEST EMAIL] Error sending test email:', err && err.message ? err.message : err);
+      return res.status(500).json({ success: false, message: 'Failed to send test email', error: err && err.message ? err.message : String(err) });
+    }
+  });
+}
+
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+
+

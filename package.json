@@ -16,6 +16,8 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@sendgrid/mail": "^8.1.6",
+    "nodemailer": "^6.9.4",
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",
     "dotenv": "^16.6.1",
@@ -30,7 +32,6 @@
     "helmet": "^7.2.0",
     "hpp": "^0.2.3",
     "morgan": "^1.10.1",
-    "nodemailer": "^6.9.4",
     "xss-clean": "^0.1.4"
   },
   "devDependencies": {

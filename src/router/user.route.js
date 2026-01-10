@@ -19,4 +19,8 @@ router.get('/history', verifyToken, historyCtrl.getHistory);
 // Profile for logged-in user
 router.get('/profile', verifyToken, usersCtrl.getProfile);
 
+// Delete account — cascades deletion of all user data
+router.delete('/delete-account', verifyToken, usersCtrl.deleteAccount);
+router.delete('/delete-account/:uid', verifyToken, usersCtrl.deleteAccount);
+
 export default router;

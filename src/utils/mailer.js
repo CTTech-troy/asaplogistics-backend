@@ -1,68 +1,62 @@
 import dotenv from 'dotenv';
 dotenv.config();
-
-const { SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, EMAIL_FROM } = process.env;
+const { SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, EMAIL_FROM, NODE_ENV } = process.env;
 
 let transporter;
 let smtpConfigured = false;
 
+// Enforce SMTP-only mail sending. Nodemailer must be installed and SMTP_* env vars provided.
 try {
-  // Dynamically import nodemailer so app can still start if package isn't installed
   const { createTransport } = await import('nodemailer');
-  if (SMTP_HOST && SMTP_USER && SMTP_PASS) {
+  if (!SMTP_HOST || !SMTP_USER || !SMTP_PASS) {
+    const msg = '[Mailer] SMTP not configured. Please set SMTP_HOST, SMTP_USER and SMTP_PASS in environment.';
+    if (NODE_ENV === 'production') {
+      console.error(msg);
+      throw new Error('SMTP is required in production');
+    } else {
+      console.warn(msg);
+    }
+  } else {
     transporter = createTransport({
       host: SMTP_HOST,
       port: parseInt(SMTP_PORT || '587', 10),
-      secure: SMTP_PORT === '465', // use TLS for 587, SSL for 465 
+      secure: String(SMTP_PORT) === '465',
       auth: {
         user: SMTP_USER,
         pass: SMTP_PASS,
       },
-      // Enable detailed logging for SMTP debugging
-      logger: true,
-      debug: true,
+      tls: {
+        // allow self-signed certificates when explicitly disabled in prod; default to true for production security
+        rejectUnauthorized: process.env.SMTP_REJECT_UNAUTHORIZED !== 'false',
+      },
     });
 
-    // Log SMTP connection events
-    transporter.verify((err, success) => {
-      if (err) {
-        console.error('[Mailer] SMTP connection test failed:', err.message);
-      } else if (success) {
-        console.log('[Mailer] SMTP connection verified successfully');
-      }
-    });
-
-    smtpConfigured = true;
-    console.log('[Mailer] SMTP configured:', {
-      host: SMTP_HOST,
-      port: parseInt(SMTP_PORT || '587', 10),
-      user: SMTP_USER,
-      secure: SMTP_PORT === '465' ? 'SSL' : 'TLS',
-    });
-  } else {
-    console.warn('[Mailer] SMTP not configured. Missing:', {
-      SMTP_HOST: !SMTP_HOST,
-      SMTP_USER: !SMTP_USER,
-      SMTP_PASS: !SMTP_PASS,
-    });
+    // Verify transporter connection and throw in production on failure
+    try {
+      await transporter.verify();
+      smtpConfigured = true;
+      console.log('[Mailer] SMTP connection verified');
+    } catch (verifyErr) {
+      console.error('[Mailer] SMTP verification failed:', verifyErr && verifyErr.message ? verifyErr.message : verifyErr);
+      if (NODE_ENV === 'production') throw verifyErr;
+    }
   }
 } catch (err) {
-  console.error('[Mailer] Failed to import nodemailer:', err.message);
-}
-
-// Fallback transporter for development/testing
-if (!transporter) {
-  transporter = {
-    sendMail: async (msg) => {
-      console.log('\n=== [MAILER FALLBACK - DEV MODE] ===');
-      console.log('To:', msg.to);
-      console.log('Subject:', msg.subject);
-      console.log('---');
-      console.log(msg.text || msg.html);
-      console.log('===================================\n');
-      return Promise.resolve();
-    },
-  };
+  console.error('[Mailer] Failed to initialize SMTP transporter:', err && err.message ? err.message : err);
+  // In non-production allow fallback to console logger
+  if (!transporter) {
+    transporter = {
+      sendMail: async (msg) => {
+        console.log('\n=== [MAILER FALLBACK - DEV MODE] ===');
+        console.log('To:', msg.to);
+        console.log('Subject:', msg.subject);
+        console.log('---');
+        console.log(msg.text || msg.html);
+        console.log('===================================\n');
+        return Promise.resolve({ fallback: true });
+      },
+    };
+  }
 }
 
 /**
@@ -118,7 +112,16 @@ export async function sendOtpByEmail({ to, otp }) {
     throw new Error('Email recipient and OTP are required');
   }
 
-  const from = EMAIL_FROM || 'noreply@asaplogistics.com';
+  // Log OTP in console for development/debugging
+  console.log(`\n${'='.repeat(50)}`);
+  console.log(`[OTP] Sending OTP to: ${to}`);
+  console.log(`[OTP] Code: ${otp}`);
+  console.log(`[OTP] Expires: 5 minutes`);
+  console.log(`${'='.repeat(50)}\n`);
+
+  // Ensure FROM matches authenticated SMTP account to avoid Gmail rejections.
+  const from = EMAIL_FROM || (SMTP_USER ? `ASAP Logistics <${SMTP_USER}>` : 'noreply@asaplogistics.com');
+  const replyTo = SMTP_USER || EMAIL_FROM || 'noreply@asaplogistics.com';
   const subject = 'Your ASAP Logistics Verification Code';
   const html = getOtpEmailHtml(otp);
   const text = `Your 4-digit verification code is: ${otp}\nIt expires in 5 minutes.`;
@@ -129,26 +132,16 @@ export async function sendOtpByEmail({ to, otp }) {
     subject,
     text,
     html,
+    replyTo,
   };
 
   try {
-    console.log('[Mailer] Attempting to send OTP email:', {
-      from,
-      to,
-      subject,
-      timestamp: new Date().toISOString(),
-      smtpConfigured,
-    });
+    console.log('[Mailer] Attempting to send OTP email:', { from, to, subject, timestamp: new Date().toISOString(), smtpConfigured });
 
+    // Send via SMTP transporter (nodemailer)
     const result = await transporter.sendMail(mailOptions);
-
     if (smtpConfigured) {
-      console.log('[Mailer] ✓ OTP email sent successfully:', {
-        to,
-        messageId: result.messageId,
-        response: result.response,
-        timestamp: new Date().toISOString(),
-      });
+      console.log('[Mailer] ✓ OTP email sent successfully:', { to, messageId: result.messageId, response: result.response, timestamp: new Date().toISOString() });
     } else {
       console.log('[Mailer] [FALLBACK MODE] OTP logged to console (SMTP not configured)');
     }
@@ -165,3 +158,4 @@ export async function sendOtpByEmail({ to, otp }) {
     throw err;
   }
 }
+ 

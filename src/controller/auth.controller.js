@@ -1,24 +1,34 @@
 import admin from "../config/firebase.js";
 import bcryptjs from "bcryptjs";
 import { sendOtpByEmail } from "../utils/mailer.js";
+import { validateAndGetReferrer, applyReferralCode, validateInviteToken, markInviteUsed } from "./referral.controller.js";
 
-// Temporary in-memory OTP store. For production use a persistent store like Redis.
-const otpStore = new Map();
+// OTP TTL for emails (milliseconds)
+const OTP_TTL_MS = 5 * 60 * 1000;
 
 function generateOtp() {
   return Math.floor(1000 + Math.random() * 9000).toString();
 }
 
-async function scheduleOtpExpiry(uid, ttlMs = 5 * 60 * 1000) {
-  setTimeout(() => otpStore.delete(uid), ttlMs);
+async function setOtpForUser(uid, otp, ttlMs = OTP_TTL_MS) {
+  const saltRounds = 10;
+  const otpHash = await bcryptjs.hash(String(otp), saltRounds);
+  const expiresAt = Date.now() + ttlMs;
+  try {
+    await admin.firestore().doc(`users/${uid}`).set({ otpHash, otpExpiresAt: expiresAt }, { merge: true });
+    console.log(`✓ [OTP] Stored OTP hash for user ${uid}, expiresAt=${new Date(expiresAt).toISOString()}`);
+  } catch (err) {
+    console.error(`✗ [OTP] Failed to store OTP for user ${uid}:`, err && err.message ? err.message : err);
+    throw err;
+  }
 }
 
-// OTP TTL and helper
-const OTP_TTL_MS = 5 * 60 * 1000;
-function hasValidOtp(uid) {
-  const rec = otpStore.get(uid);
-  if (!rec) return false;
-  return (Date.now() - (rec.createdAt || 0)) < OTP_TTL_MS;
+async function clearOtpForUser(uid) {
+  try {
+    await admin.firestore().doc(`users/${uid}`).set({ otpHash: null, otpExpiresAt: null }, { merge: true });
+  } catch (err) {
+    console.error(`✗ [OTP] Failed to clear OTP for user ${uid}:`, err && err.message ? err.message : err);
+  }
 }
 
 // Helper to log full error for developers and send a sanitized message to client
@@ -37,7 +47,7 @@ function logAndRespond(res, err, userMessage = 'An unexpected error occurred', s
 // ================= SIGNUP =================
 export const signup = async (req, res) => {
   try {
-    const { fullName, email, phone, password, rememberMe } = req.body;
+    const { fullName, email, phone, password, rememberMe, referralCode } = req.body;
 
     // Input validation with detailed error messages
     if (!fullName || String(fullName).trim().length === 0) {
@@ -83,7 +93,6 @@ export const signup = async (req, res) => {
           registeredIp: clientIp,
           trustedIps: rememberMe === true ? [clientIp] : [],
           wallet: { balance: 0 },
-          dashboardMessage: 'Place your order now to get free delivery on your next order',
           createdAt: Date.now(),
           lastLoginAt: Date.now(),
           role: 'user',
@@ -92,16 +101,44 @@ export const signup = async (req, res) => {
         console.error('Failed to write user document to Firestore', fsErr);
       }
 
-      // If an OTP was already generated recently, don't resend
-      if (hasValidOtp(user.uid)) {
-        console.log(`i [SIGNUP] Existing valid OTP present for ${email}, not resending`);
-        return res.status(200).json({ success: true, message: 'OTP already sent', uid: user.uid, email });
+      // Handle invite token (one-time) or referral code (reusable)
+      const { inviteToken } = req.body;
+      if (inviteToken) {
+        try {
+          const v = await validateInviteToken(inviteToken);
+          if (v.valid) {
+            const referrerUid = v.referrerUid;
+            // get referrer's code for record
+            const refSnap = await admin.firestore().doc(`users/${referrerUid}`).get();
+            const refData = refSnap.exists ? refSnap.data() : {};
+            const refCode = refData.referralCode || null;
+            const applyResult = await applyReferralCode(refCode, user.uid, referrerUid);
+            console.log(`✓ [SIGNUP] Invite applied: ${applyResult.message}`);
+            // mark invite used
+            await markInviteUsed(v.inviteId, user.uid);
+          } else {
+            console.warn('[SIGNUP] Invalid or expired invite token');
+          }
+        } catch (e) {
+          console.error('[SIGNUP] Error applying invite token:', e && e.message ? e.message : e);
+        }
+      } else if (referralCode) {
+        const referrerInfo = await validateAndGetReferrer(referralCode);
+        if (referrerInfo.valid) {
+          const applyResult = await applyReferralCode(referralCode, user.uid, referrerInfo.referrerId);
+          console.log(`✓ [SIGNUP] Referral applied: ${applyResult.message}`);
+        } else {
+          console.warn(`[SIGNUP] Invalid referral code: ${referralCode}`);
+        }
       }
 
-      // Generate and store OTP
+      // Generate OTP, persist hashed OTP in Firestore, and send via SMTP
       const otp = generateOtp();
-      otpStore.set(user.uid, { otp, createdAt: Date.now() });
-      scheduleOtpExpiry(user.uid);
+      try {
+        await setOtpForUser(user.uid, otp);
+      } catch (err) {
+        console.error('[SIGNUP] Could not persist OTP to datastore:', err && err.message ? err.message : err);
+      }
 
       // Send OTP by email
       let emailSent = false;
@@ -112,7 +149,7 @@ export const signup = async (req, res) => {
           console.log(`✓ [SIGNUP] OTP email sent successfully to ${email}`);
         }
       } catch (mailErr) {
-        console.error(`✗ [SIGNUP] Failed to send OTP email to ${email}:`, mailErr.message);
+        console.error(`✗ [SIGNUP] Failed to send OTP email to ${email}:`, mailErr && mailErr.message ? mailErr.message : mailErr);
       }
       if (!emailSent && email) {
         console.warn(`[SIGNUP] Email could not be sent to ${email}. User must verify via OTP code instead.`);
@@ -189,11 +226,14 @@ export const login = async (req, res) => {
       }
     }
 
-    // Standard OTP flow
+    // Standard OTP flow: persist hashed OTP in Firestore, then email it
     const otp = generateOtp();
-    otpStore.set(user.uid, { otp, createdAt: Date.now(), rememberMe: rememberMe === true });
-    scheduleOtpExpiry(user.uid);
-    
+    try {
+      await setOtpForUser(user.uid, otp, OTP_TTL_MS);
+    } catch (err) {
+      console.error('[LOGIN] Could not persist OTP to datastore:', err && err.message ? err.message : err);
+    }
+
     let emailSent = false;
     try {
       if (user.email) {
@@ -204,7 +244,7 @@ export const login = async (req, res) => {
         console.warn(`[LOGIN] No email on file for user ${user.uid}. Could not send OTP email.`);
       }
     } catch (mailErr) {
-      console.error(`✗ [LOGIN] Failed to send OTP email to ${user.email}:`, mailErr.message);
+      console.error(`✗ [LOGIN] Failed to send OTP email to ${user.email}:`, mailErr && mailErr.message ? mailErr.message : mailErr);
     }
     if (!emailSent && !user.email) {
       console.warn(`[LOGIN] User ${user.uid} must verify via OTP code instead of email.`);
@@ -355,45 +395,54 @@ export const verifyOtpOrCode = async (req, res) => {
     }
 
     if (uid && otp) {
-      const record = otpStore.get(uid);
-      if (record && record.otp === String(otp)) {
-        otpStore.delete(uid);
-        // create server session token and persist to Firestore (single active session)
+      try {
+        const userRef = admin.firestore().doc(`users/${uid}`);
+        const snap = await userRef.get();
+        if (!snap.exists) {
+          console.error(`✗ [VERIFY OTP] No user record for uid ${uid}`);
+          return res.status(401).json({ message: 'Invalid OTP' });
+        }
+        const data = snap.data() || {};
+        const { otpHash, otpExpiresAt } = data;
+        if (!otpHash || !otpExpiresAt || Date.now() > otpExpiresAt) {
+          console.error(`✗ [VERIFY OTP] OTP missing or expired for user ${uid}`);
+          return res.status(401).json({ message: 'Invalid or expired OTP' });
+        }
+
+        const match = await bcryptjs.compare(String(otp), otpHash);
+        if (!match) {
+          console.error(`✗ [VERIFY OTP] Invalid OTP attempt for user ${uid}`);
+          return res.status(401).json({ message: 'Invalid OTP' });
+        }
+
+        // OTP is valid. Clear stored OTP and create session token.
+        await clearOtpForUser(uid);
         try {
           const sessionToken = `sess_${makeDebugId()}`;
-          const userRef = admin.firestore().doc(`users/${uid}`);
-          
-          // Get current user data to update remember me settings
-          const userSnap = await userRef.get();
-          const userData = userSnap.exists ? userSnap.data() : {};
-          
-          // If user has remember me enabled, add this IP to trusted IPs
           const updatedData = {
             currentSession: sessionToken,
             sessionIssuedAt: Date.now(),
             lastLoginIp: clientIp,
             lastLoginAt: Date.now(),
           };
-          
-          if (userData.rememberMe) {
-            const trustedIps = userData.trustedIps || [];
+          if (data.rememberMe) {
+            const trustedIps = data.trustedIps || [];
             if (!trustedIps.includes(clientIp)) {
               updatedData.trustedIps = [...trustedIps, clientIp];
               console.log(`✓ [VERIFY OTP] Added trusted IP ${clientIp} for user ${uid}`);
             }
           }
-          
           await userRef.set(updatedData, { merge: true });
           console.log(`✓ [VERIFY OTP] OTP verified successfully for user ${uid} from IP ${clientIp}`);
-          
           return res.status(200).json({ success: true, message: 'OTP verified (by code)', uid, sessionToken });
         } catch (e) {
           console.error('Failed to persist session token after OTP', e);
           return res.status(200).json({ success: true, message: 'OTP verified (by code)', uid });
         }
+      } catch (err) {
+        console.error('✗ [VERIFY OTP] Error during verification:', err && err.message ? err.message : err);
+        return res.status(500).json({ message: 'Verification failed' });
       }
-      console.error(`✗ [VERIFY OTP] Invalid OTP attempt for user ${uid}`);
-      return res.status(401).json({ message: 'Invalid OTP' });
     }
 
     return res.status(400).json({ message: 'Missing verification parameters' });
