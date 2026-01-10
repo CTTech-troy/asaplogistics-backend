@@ -3,7 +3,10 @@ import { Resend } from 'resend';
 
 dotenv.config();
 
-const { RESEND_API_KEY, NODE_ENV } = process.env;
+const { RESEND_API_KEY, RESEND_FROM_EMAIL, NODE_ENV } = process.env;
+
+// Default from email (production should override with verified domain)
+const DEFAULT_FROM_EMAIL = RESEND_FROM_EMAIL || 'noreply@asaplogistics.com.ng';
 
 let resend;
 let mailConfigured = false;
@@ -22,6 +25,7 @@ try {
     resend = new Resend(RESEND_API_KEY);
     mailConfigured = true;
     console.log('[Mailer] ✓ Resend initialized successfully');
+    console.log(`[Mailer] From email: ${DEFAULT_FROM_EMAIL}`);
   }
 } catch (err) {
   console.error('[Mailer] Failed to initialize Resend:', err && err.message ? err.message : err);
@@ -114,7 +118,7 @@ export async function sendOtpByEmail({ to, otp }) {
 
     // Send via Resend API
     const result = await resend.emails.send({
-      from: 'ASAP Logistics <onboarding@resend.dev>',
+      from: `ASAP Logistics <${DEFAULT_FROM_EMAIL}>`,
       to,
       subject,
       html,
