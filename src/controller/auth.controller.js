@@ -163,6 +163,8 @@ export const signup = async (req, res) => {
         uid: user.uid,
         email: email,
         emailSent: emailSent,
+        // Include OTP in dev mode for testing/development
+        otp: process.env.NODE_ENV === 'development' ? otp : undefined,
       });
     } catch (authErr) {
       // Handle specific Firebase Auth errors
