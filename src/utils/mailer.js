@@ -187,8 +187,8 @@ export async function sendBulkEmail({ recipients, subject, html, text }) {
         // Handle both single email and batch array
         let result;
         if (Array.isArray(emailDataOrArray)) {
-          // Batch API call - send array directly
-          result = await resend.emails.batch(emailDataOrArray);
+          // Batch API call - use resend.batch() method directly
+          result = await resend.batch(emailDataOrArray);
         } else {
           // Single email call
           result = await resend.emails.send(emailDataOrArray);
