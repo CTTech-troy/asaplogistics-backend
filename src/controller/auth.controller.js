@@ -781,6 +781,39 @@ export const updateAppSettings = async (req, res) => {
   }
 };
 // ================= SEED ADMIN (DEV ONLY) =================
+// ================= GET CURRENT USER =================
+export const getCurrentUser = async (req, res) => {
+  try {
+    const uid = req.user?.uid;
+    if (!uid) {
+      return res.status(401).json({ message: 'Unauthorized' });
+    }
+
+    const userDoc = await admin.firestore().doc(`users/${uid}`).get();
+    if (!userDoc.exists) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    const userData = userDoc.data();
+    return res.status(200).json({
+      success: true,
+      user: {
+        uid,
+        fullName: userData.fullName || 'User',
+        email: userData.email,
+        phone: userData.phone,
+        role: userData.role,
+        walletBalance: userData.walletBalance || 0,
+        createdAt: userData.createdAt,
+      },
+    });
+  } catch (err) {
+    console.error('[GET CURRENT USER] Error:', err);
+    return res.status(500).json({ message: 'Failed to get current user' });
+  }
+};
+
+// ================= SEED ADMIN =================
 export const seedAdmin = async (req, res) => {
   try {
     // Only allow in development or if a special seed token is provided

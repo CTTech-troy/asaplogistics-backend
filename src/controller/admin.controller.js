@@ -1,4 +1,6 @@
 import admin from '../config/firebase.js';
+import { decryptToUTF8 } from '../utils/crypto.js';
+import { sendBulkEmail } from '../utils/mailer.js';
 
 // Admin: list recent orders across all users (collectionGroup)
 export const listOrders = async (req, res) => {
@@ -77,7 +79,9 @@ export const listUsers = async (req, res) => {
         fullName: data.fullName || 'N/A',
         email: data.email || 'N/A',
         phone: data.phone || 'N/A',
-        walletBalance: data.walletBalance || 0,
+        wallet: {
+          balance: data.wallet?.balance ?? data.walletBalance ?? 0,
+        },
         referralCode: data.referralCode || 'N/A',
         createdAt: data.createdAt || null,
       });
@@ -136,10 +140,9 @@ export const listContacts = async (req, res) => {
         id: doc.id,
         name: data.name || 'N/A',
         subject: data.subject || 'N/A',
-        // Note: Email and message are encrypted; don't decrypt in this list view
-        // For security, we'd need decryption keys from environment
-        email: data.email ? '[Encrypted]' : 'N/A',
-        message: data.message ? '[Encrypted]' : 'N/A',
+        // Return encrypted message and email objects for frontend decryption
+        email: data.email || null,
+        message: data.message || null,
         createdAt: data.createdAt ? data.createdAt.toMillis ? data.createdAt.toMillis() : data.createdAt : null,
       });
     });
@@ -166,5 +169,75 @@ export const deleteContact = async (req, res) => {
   } catch (err) {
     console.error('deleteContact error', err);
     return res.status(500).json({ message: 'Could not delete contact' });
+  }
+};
+
+// Admin: decrypt a contact message
+export const decryptContactMessage = async (req, res) => {
+  try {
+    const encryptedMessage = req.body;
+
+    if (!encryptedMessage || !encryptedMessage.iv || !encryptedMessage.tag || !encryptedMessage.data) {
+      return res.status(400).json({ message: 'Invalid encrypted message format' });
+    }
+
+    try {
+      const decrypted = decryptToUTF8(encryptedMessage);
+      return res.status(200).json({ success: true, decrypted });
+    } catch (decryptErr) {
+      console.error('Decryption failed:', decryptErr.message);
+      return res.status(400).json({ message: 'Decryption failed: ' + decryptErr.message });
+    }
+  } catch (err) {
+    console.error('decryptContactMessage error', err);
+    return res.status(500).json({ message: 'Could not decrypt message' });
+  }
+};
+
+// Admin: send email to multiple users
+export const sendEmailToUsers = async (req, res) => {
+  try {
+    const { recipients, subject, message, isHtml } = req.body;
+
+    if (!recipients || !Array.isArray(recipients) || recipients.length === 0) {
+      return res.status(400).json({ message: 'Recipients array is required' });
+    }
+
+    if (!subject || !message) {
+      return res.status(400).json({ message: 'Subject and message are required' });
+    }
+
+    // Validate email addresses
+    const validEmails = recipients.filter(email => {
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      return emailRegex.test(email);
+    });
+
+    if (validEmails.length === 0) {
+      return res.status(400).json({ message: 'No valid email addresses provided' });
+    }
+
+    console.log(`[ADMIN] Sending email to ${validEmails.length} users...`);
+
+    // Send bulk email
+    const result = await sendBulkEmail({
+      recipients: validEmails,
+      subject,
+      html: isHtml ? message : `<p>${message.replace(/\n/g, '<br>')}</p>`,
+    });
+
+    console.log(`[ADMIN] Bulk email result:`, result);
+
+    return res.status(200).json({
+      success: true,
+      message: 'Email send completed',
+      sentCount: result.sent?.length || 0,
+      failedCount: result.failed?.length || 0,
+      skippedCount: recipients.length - validEmails.length,
+      failed: result.failed || [],
+    });
+  } catch (err) {
+    console.error('[ADMIN] sendEmailToUsers error:', err);
+    return res.status(500).json({ message: 'Failed to send email: ' + (err?.message || 'Unknown error') });
   }
 };

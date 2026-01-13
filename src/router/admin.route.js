@@ -10,5 +10,7 @@ router.get('/users', verifyToken, isAdmin, adminCtrl.listUsers);
 router.get('/referral-stats', verifyToken, isAdmin, adminCtrl.getReferralStats);
 router.get('/contacts', verifyToken, isAdmin, adminCtrl.listContacts);
 router.delete('/contacts/:contactId', verifyToken, isAdmin, adminCtrl.deleteContact);
+router.post('/decrypt-message', verifyToken, isAdmin, adminCtrl.decryptContactMessage);
+router.post('/send-email', verifyToken, isAdmin, adminCtrl.sendEmailToUsers);
 
 export default router;
