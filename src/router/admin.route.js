@@ -6,5 +6,9 @@ const router = express.Router();
 
 router.get('/orders', verifyToken, isAdmin, adminCtrl.listOrders);
 router.patch('/orders/:uid/:orderId', verifyToken, isAdmin, adminCtrl.updateOrderStatus);
+router.get('/users', verifyToken, isAdmin, adminCtrl.listUsers);
+router.get('/referral-stats', verifyToken, isAdmin, adminCtrl.getReferralStats);
+router.get('/contacts', verifyToken, isAdmin, adminCtrl.listContacts);
+router.delete('/contacts/:contactId', verifyToken, isAdmin, adminCtrl.deleteContact);
 
 export default router;

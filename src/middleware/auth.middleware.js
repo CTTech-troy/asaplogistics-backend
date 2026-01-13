@@ -4,31 +4,76 @@ import admin from '../config/firebase.js';
 export async function verifyToken(req, res, next) {
   try {
     const auth = req.headers.authorization || '';
-    if (!auth.startsWith('Bearer ')) return res.status(401).json({ message: 'Missing or invalid authorization header' });
-    const idToken = auth.split(' ')[1];
+    if (!auth.startsWith('Bearer ')) {
+      console.warn('[AUTH] Missing or invalid authorization header');
+      return res.status(401).json({ message: 'Missing or invalid authorization header' });
+    }
+    const token = auth.split(' ')[1];
+    console.log('[AUTH] Token received:', token.substring(0, 20) + '...');
+    
     // Support two token types:
-    // - Firebase ID tokens (opaque strings)
     // - Server session tokens we issue that start with 'sess_'
-    if (String(idToken).startsWith('sess_')) {
-      // session token: look up user document with matching currentSession
+    // - Firebase ID tokens (opaque strings)
+    
+    if (String(token).startsWith('sess_')) {
+      console.log('[AUTH] Attempting session token lookup...');
+      // Session token: look up user document with matching currentSession
       try {
-        const qSnap = await admin.firestore().collection('users').where('currentSession', '==', idToken).limit(1).get();
-        if (qSnap.empty) return res.status(401).json({ message: 'Invalid session' });
-        const udoc = qSnap.docs[0].data();
-        req.user = { uid: udoc.uid, role: udoc.role, fullName: udoc.fullName, email: udoc.email, session: idToken };
+        const usersRef = admin.firestore().collection('users');
+        const qSnap = await usersRef.where('currentSession', '==', token).limit(1).get();
+        
+        if (qSnap.empty) {
+          console.warn('[AUTH] Session token not found in database:', token.substring(0, 20) + '...');
+          return res.status(401).json({ message: 'Invalid session' });
+        }
+        
+        const userDoc = qSnap.docs[0];
+        const udoc = userDoc.data();
+        console.log('[AUTH] Session token verified for user:', udoc.email, 'Role:', udoc.role);
+        
+        req.user = { 
+          uid: userDoc.id,
+          role: udoc.role, 
+          fullName: udoc.fullName, 
+          email: udoc.email, 
+          phone: udoc.phone,
+          session: token,
+          admin: udoc.role === 'admin',
+          isAdmin: udoc.role === 'admin'
+        };
+        console.log('[AUTH] User authenticated:', { uid: req.user.uid, role: req.user.role, isAdmin: req.user.isAdmin });
         return next();
       } catch (e) {
-        console.error('Session token verification failed', e);
+        console.error('[AUTH] Session token verification failed:', e.message);
         return res.status(401).json({ message: 'Unauthorized' });
       }
     }
 
     // Otherwise treat as Firebase ID token
-    const decoded = await admin.auth().verifyIdToken(idToken);
-    req.user = decoded;
-    return next();
+    console.log('[AUTH] Attempting Firebase ID token verification...');
+    try {
+      const decoded = await admin.auth().verifyIdToken(token);
+      console.log('[AUTH] Firebase token verified for user:', decoded.email);
+      req.user = {
+        uid: decoded.uid,
+        email: decoded.email,
+        ...decoded
+      };
+      return next();
+    } catch (firebaseErr) {
+      // Check if it's a custom token error - give helpful message
+      if (firebaseErr.message && firebaseErr.message.includes('custom token')) {
+        console.warn('[AUTH] Custom token detected (not allowed). Admin must use session token. Token:', token.substring(0, 50) + '...');
+        return res.status(401).json({ 
+          message: 'Invalid token. Admin must log in via /api/auth/admin-login endpoint to receive a session token (starting with "sess_").',
+          hint: 'Use the adminLogin endpoint with email and password to obtain a valid session token.'
+        });
+      }
+      console.warn('[AUTH] Firebase token verification failed:', firebaseErr.message);
+      return res.status(401).json({ message: 'Unauthorized' });
+    }
   } catch (err) {
-    console.warn('Token verification failed', err && err.message ? err.message : err);
+    console.error('[AUTH] Token verification error:', err && err.message ? err.message : err);
     return res.status(401).json({ message: 'Unauthorized' });
   }
 }

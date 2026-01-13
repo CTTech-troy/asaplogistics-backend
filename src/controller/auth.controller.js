@@ -49,6 +49,29 @@ export const signup = async (req, res) => {
   try {
     const { fullName, email, phone, password, rememberMe, referralCode } = req.body;
 
+    // Check if new user signups are enabled (only applicable to non-admin users)
+    const adminWhitelist = (process.env.ADMIN_EMAILS || '').split(',').map(e => e.toLowerCase().trim()).filter(Boolean);
+    const isAdminSignup = adminWhitelist.includes(email?.toLowerCase().trim() || '');
+
+    if (!isAdminSignup) {
+      let appSettings = {};
+      try {
+        const settingsSnap = await admin.firestore().doc('settings/app').get();
+        appSettings = settingsSnap.exists ? settingsSnap.data() : { signUpNewUsers: true };
+      } catch (err) {
+        console.warn('[SIGNUP] Could not fetch app settings:', err && err.message ? err.message : err);
+        appSettings = { signUpNewUsers: true };
+      }
+
+      if (appSettings.signUpNewUsers === false) {
+        return res.status(403).json({ 
+          message: 'New user registration is currently disabled. Please contact support.' 
+        });
+      }
+    } else {
+      console.log(`✓ [SIGNUP] Admin signup bypass enabled for ${email}`);
+    }
+
     // Input validation with detailed error messages
     if (!fullName || String(fullName).trim().length === 0) {
       return res.status(400).json({ message: 'Full name is required' });
@@ -81,6 +104,10 @@ export const signup = async (req, res) => {
       const hashedPassword = await bcryptjs.hash(password, 10);
 
       // Create Firestore document with password hash and IP tracking
+      // Set role to 'admin' if this is an admin signup, otherwise 'user'
+      const adminWhitelist = (process.env.ADMIN_EMAILS || '').split(',').map(e => e.toLowerCase().trim()).filter(Boolean);
+      const userRole = adminWhitelist.includes(email?.toLowerCase().trim() || '') ? 'admin' : 'user';
+
       try {
         await admin.firestore().doc(`users/${user.uid}`).set({
           uid: user.uid,
@@ -95,8 +122,11 @@ export const signup = async (req, res) => {
           wallet: { balance: 0 },
           createdAt: Date.now(),
           lastLoginAt: Date.now(),
-          role: 'user',
+          role: userRole,
         }, { merge: true });
+        if (userRole === 'admin') {
+          console.log(`✓ [SIGNUP] Admin account created: ${email}`);
+        }
       } catch (fsErr) {
         console.error('Failed to write user document to Firestore', fsErr);
       }
@@ -157,12 +187,24 @@ export const signup = async (req, res) => {
 
       console.log(`✓ [SIGNUP] New user registered: ${email} from IP ${clientIp}`);
 
+      // Get app settings to check if signup flow should be displayed
+      let appSettings = {};
+      try {
+        const settingsSnap = await admin.firestore().doc('settings/app').get();
+        appSettings = settingsSnap.exists ? settingsSnap.data() : { showSignupFlow: true };
+      } catch (err) {
+        console.warn('[SIGNUP] Could not fetch app settings:', err && err.message ? err.message : err);
+        appSettings = { showSignupFlow: true };
+      }
+
       res.status(201).json({
         success: true,
         message: emailSent ? "Signup successful. OTP sent to your email." : "Signup successful but email could not be sent. Check console for OTP.",
         uid: user.uid,
         email: email,
         emailSent: emailSent,
+        showSignupFlow: appSettings.showSignupFlow !== false,
+        signUpNewUsers: appSettings.signUpNewUsers !== false,
         // Include OTP in dev mode for testing/development
         otp: process.env.NODE_ENV === 'development' ? otp : undefined,
       });
@@ -281,6 +323,16 @@ export const loginWithPassword = async (req, res) => {
                      req.connection?.remoteAddress || 
                      'unknown';
 
+    // Get app settings to check if IP verification is required
+    let appSettings = {};
+    try {
+      const settingsSnap = await admin.firestore().doc('settings/app').get();
+      appSettings = settingsSnap.exists ? settingsSnap.data() : { signUpNewUsers: true };
+    } catch (err) {
+      console.warn('[LOGIN PASSWORD] Could not fetch app settings:', err && err.message ? err.message : err);
+      appSettings = { signUpNewUsers: true };
+    }
+
     // Look up user document by phone in Firestore to avoid depending on
     // admin.auth network lookup (which can fail with DNS/proxy issues).
     const usersRef = admin.firestore().collection('users');
@@ -301,8 +353,17 @@ export const loginWithPassword = async (req, res) => {
     // Verify password using bcrypt
     const passwordMatch = await bcryptjs.compare(password, passwordHash);
     if (!passwordMatch) {
-      console.warn(`[LOGIN PASSWORD] Failed login attempt for user ${user.uid} from IP ${clientIp}`);
+      console.warn(`[LOGIN PASSWORD] Failed login attempt for user ${uid} from IP ${clientIp}`);
       return res.status(401).json({ message: 'Invalid phone number or password' });
+    }
+
+    // If signups are disabled, enforce IP matching for security
+    if (appSettings.signUpNewUsers === false && userData.registeredIp && userData.registeredIp !== clientIp) {
+      console.warn(`[LOGIN PASSWORD] IP mismatch for user ${uid}. Registered IP: ${userData.registeredIp}, Current IP: ${clientIp}`);
+      return res.status(403).json({ 
+        message: 'Login from different IP address is not allowed. Please contact support.',
+        ipMismatch: true
+      });
     }
 
     // Check if user is logging in from a trusted IP (remember me feature)
@@ -543,5 +604,252 @@ export const signupBulk = async (req, res) => {
     res.status(200).json({ success: true, results, total: users.length });
   } catch (error) {
     return logAndRespond(res, error, 'Bulk signup failed', 500);
+  }
+};
+
+// Admin Login: Verify email and password for admin access
+export const adminLogin = async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    if (!email || !password) {
+      return res.status(400).json({ message: 'Email and password are required' });
+    }
+
+    // Get user by email
+    const usersSnap = await admin.firestore().collection('users').where('email', '==', email).limit(1).get();
+    if (usersSnap.empty) {
+      return res.status(401).json({ message: 'Invalid email or password' });
+    }
+
+    const userDoc = usersSnap.docs[0];
+    const userData = userDoc.data();
+    const uid = userDoc.id;
+
+    // Check if user is admin (check role field)
+    if (userData.role !== 'admin') {
+      return res.status(403).json({ message: 'Admin access denied' });
+    }
+
+    // Verify password using bcrypt (same as regular login)
+    const passwordHash = userData?.passwordHash;
+    if (!passwordHash) {
+      return res.status(401).json({ message: 'Invalid email or password' });
+    }
+
+    const passwordMatch = await bcryptjs.compare(password, passwordHash);
+    if (!passwordMatch) {
+      console.warn(`[ADMIN LOGIN] Failed admin login attempt for user ${uid}`);
+      return res.status(401).json({ message: 'Invalid email or password' });
+    }
+
+    // Get client IP address
+    const clientIp = req.headers['x-forwarded-for']?.split(',')[0].trim() || 
+                     req.socket?.remoteAddress || 
+                     req.connection?.remoteAddress || 
+                     'unknown';
+
+    // Create session token (not custom token) for admin
+    const sessionToken = `sess_${makeDebugId()}`;
+    try {
+      await admin.firestore().doc(`users/${uid}`).set({
+        currentSession: sessionToken,
+        sessionIssuedAt: Date.now(),
+        lastLoginIp: clientIp,
+        lastLoginAt: Date.now(),
+      }, { merge: true });
+    } catch (e) {
+      console.error('Failed to persist admin login session', e);
+    }
+
+    console.log(`✓ [ADMIN LOGIN] Admin logged in: ${email} from IP ${clientIp}`);
+
+    return res.status(200).json({
+      success: true,
+      message: 'Admin login successful',
+      token: sessionToken,
+      adminToken: sessionToken,
+      uid: uid,
+      fullName: userData.fullName,
+      email: userData.email,
+      role: 'admin',
+    });
+  } catch (err) {
+    console.error('[ADMIN LOGIN] Error:', err);
+    return res.status(500).json({ message: 'Admin login failed' });
+  }
+};
+
+// ================= SETTINGS =================
+// Get app settings (signup flow control)
+export const getAppSettings = async (req, res) => {
+  try {
+    const settingsSnap = await admin.firestore().doc('settings/app').get();
+    const settings = settingsSnap.exists ? settingsSnap.data() : { showSignupFlow: true, signUpNewUsers: true };
+    
+    return res.status(200).json({
+      success: true,
+      settings: {
+        showSignupFlow: settings.showSignupFlow !== false,
+        signUpNewUsers: settings.signUpNewUsers !== false,
+      },
+    });
+  } catch (err) {
+    console.error('[GET SETTINGS] Error:', err);
+    return res.status(500).json({ success: false, message: 'Failed to get settings' });
+  }
+};
+
+// Update app settings (admin only)
+export const updateAppSettings = async (req, res) => {
+  try {
+    // Check if user is authenticated as admin
+    const token = req.headers.authorization?.split('Bearer ')[1];
+    if (!token) {
+      return res.status(401).json({ message: 'Unauthorized' });
+    }
+
+    let uid;
+    let userDoc;
+
+    // Handle session tokens (starting with 'sess_')
+    if (String(token).startsWith('sess_')) {
+      const usersRef = admin.firestore().collection('users');
+      const qSnap = await usersRef.where('currentSession', '==', token).limit(1).get();
+      
+      if (qSnap.empty) {
+        return res.status(401).json({ message: 'Unauthorized' });
+      }
+      
+      userDoc = qSnap.docs[0];
+      uid = userDoc.id;
+    } else {
+      // Handle Firebase ID tokens
+      try {
+        const decodedToken = await admin.auth().verifyIdToken(token);
+        uid = decodedToken.uid;
+        userDoc = await admin.firestore().doc(`users/${uid}`).get();
+      } catch (err) {
+        return res.status(401).json({ message: 'Unauthorized' });
+      }
+    }
+    
+    if (!userDoc.exists || userDoc.data().role !== 'admin') {
+      return res.status(403).json({ message: 'Forbidden: Admin access required' });
+    }
+
+    const { showSignupFlow, signUpNewUsers } = req.body;
+
+    // Validate input - at least one setting must be provided
+    const updates = {};
+    
+    if (showSignupFlow !== undefined && typeof showSignupFlow !== 'boolean') {
+      return res.status(400).json({ message: 'showSignupFlow must be a boolean' });
+    }
+    if (showSignupFlow !== undefined) {
+      updates.showSignupFlow = showSignupFlow;
+    }
+
+    if (signUpNewUsers !== undefined && typeof signUpNewUsers !== 'boolean') {
+      return res.status(400).json({ message: 'signUpNewUsers must be a boolean' });
+    }
+    if (signUpNewUsers !== undefined) {
+      updates.signUpNewUsers = signUpNewUsers;
+    }
+
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({ message: 'At least one setting must be provided' });
+    }
+
+    updates.updatedAt = Date.now();
+    updates.updatedBy = uid;
+
+    await admin.firestore().doc('settings/app').set(updates, { merge: true });
+
+    console.log(`✓ [UPDATE SETTINGS] App settings updated:`, updates);
+
+    return res.status(200).json({
+      success: true,
+      message: 'Settings updated successfully',
+      settings: {
+        showSignupFlow: showSignupFlow !== undefined ? showSignupFlow : undefined,
+        signUpNewUsers: signUpNewUsers !== undefined ? signUpNewUsers : undefined,
+      },
+    });
+  } catch (err) {
+    console.error('[UPDATE SETTINGS] Error:', err);
+    return res.status(500).json({ success: false, message: 'Failed to update settings' });
+  }
+};
+// ================= SEED ADMIN (DEV ONLY) =================
+export const seedAdmin = async (req, res) => {
+  try {
+    // Only allow in development or if a special seed token is provided
+    const seedToken = req.headers['x-seed-token'];
+    const isDev = process.env.NODE_ENV === 'development';
+    
+    if (!isDev && seedToken !== process.env.SEED_TOKEN) {
+      return res.status(403).json({ message: 'Unauthorized' });
+    }
+
+    const adminEmail = 'admin@asaplogis.com';
+    const adminPassword = 'admin123';
+    
+    // Hash the password
+    const saltRounds = 10;
+    const passwordHash = await bcryptjs.hash(adminPassword, saltRounds);
+    
+    // Check if admin already exists
+    const existingAdmin = await admin.firestore().collection('users').where('email', '==', adminEmail).limit(1).get();
+    
+    if (!existingAdmin.empty) {
+      const docId = existingAdmin.docs[0].id;
+      // Update existing admin with password hash
+      await admin.firestore().doc(`users/${docId}`).set({
+        passwordHash,
+        role: 'admin',
+        updatedAt: Date.now(),
+      }, { merge: true });
+      
+      console.log(`✓ [SEED] Updated existing admin user: ${adminEmail}`);
+      return res.status(200).json({
+        success: true,
+        message: 'Admin user updated successfully',
+        email: adminEmail,
+        uid: docId,
+      });
+    }
+    
+    // Create new admin user
+    const adminDoc = admin.firestore().collection('users').doc();
+    const uid = adminDoc.id;
+    
+    await adminDoc.set({
+      uid,
+      email: adminEmail,
+      fullName: 'Admin User',
+      phone: '+1234567890',
+      passwordHash,
+      role: 'admin',
+      walletBalance: 0,
+      referralCode: `admin_${makeDebugId()}`,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    
+    console.log(`✓ [SEED] Created new admin user: ${adminEmail} (${uid})`);
+    
+    return res.status(201).json({
+      success: true,
+      message: 'Admin user created successfully',
+      email: adminEmail,
+      uid,
+      credentials: {
+        email: adminEmail,
+        password: adminPassword,
+      },
+    });
+  } catch (err) {
+    console.error('[SEED ADMIN] Error:', err);
+    return res.status(500).json({ success: false, message: 'Seed failed' });
   }
 };
