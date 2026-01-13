@@ -180,11 +180,19 @@ export async function sendBulkEmail({ recipients, subject, html, text }) {
   /**
    * Retry function with exponential backoff
    */
-  const sendWithRetry = async (emailData, maxRetries = 3) => {
+  const sendWithRetry = async (emailDataOrArray, maxRetries = 3) => {
     let lastError;
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
-        const result = await resend.emails.send(emailData);
+        // Handle both single email and batch array
+        let result;
+        if (Array.isArray(emailDataOrArray)) {
+          // Batch API call - send array directly
+          result = await resend.emails.batch(emailDataOrArray);
+        } else {
+          // Single email call
+          result = await resend.emails.send(emailDataOrArray);
+        }
         
         if (result.error) {
           lastError = result.error;
@@ -226,8 +234,8 @@ export async function sendBulkEmail({ recipients, subject, html, text }) {
       }));
 
       try {
-        // Send batch via Resend batch API
-        const batchResult = await sendWithRetry({ emails }, 3);
+        // Send batch via Resend batch API - send array directly, not wrapped in { emails }
+        const batchResult = await sendWithRetry(emails, 3);
         
         if (batchResult.data) {
           // Successful batch send
