@@ -786,15 +786,19 @@ export const getCurrentUser = async (req, res) => {
   try {
     const uid = req.user?.uid;
     if (!uid) {
+      console.warn('[getCurrentUser] No UID in request user:', req.user);
       return res.status(401).json({ message: 'Unauthorized' });
     }
 
     const userDoc = await admin.firestore().doc(`users/${uid}`).get();
     if (!userDoc.exists) {
+      console.warn('[getCurrentUser] User not found:', uid);
       return res.status(404).json({ message: 'User not found' });
     }
 
     const userData = userDoc.data();
+    console.log('[getCurrentUser] Fetched user:', uid, userData.email);
+    
     return res.status(200).json({
       success: true,
       user: {
@@ -803,7 +807,9 @@ export const getCurrentUser = async (req, res) => {
         email: userData.email,
         phone: userData.phone,
         role: userData.role,
-        walletBalance: userData.walletBalance || 0,
+        wallet: {
+          balance: userData.wallet?.balance ?? userData.walletBalance ?? 0,
+        },
         createdAt: userData.createdAt,
       },
     });
