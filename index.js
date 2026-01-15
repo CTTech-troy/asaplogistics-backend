@@ -1,16 +1,26 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
+import { WebSocketServer } from 'ws';
+import { createServer } from 'http';
 
 import authRoutes from './src/router/auth.route.js';
 import userRoutes from './src/router/user.route.js';
 import adminRoutes from './src/router/admin.route.js';
 import contactRoutes from './src/router/contact.route.js';
 import referralRoutes from './src/router/referral.route.js';
+import paymentRoutes from './src/router/payment.route.js';
+import { handleWebSocketConnection } from './src/controller/payment.controller.js';
 
 dotenv.config();
 
 const app = express();
+const server = createServer(app);
+
+// WebSocket server
+const wss = new WebSocketServer({ server });
+
+wss.on('connection', handleWebSocketConnection);
 
 // Dynamically load optional security middlewares so server can start
 // even if dev hasn't installed them yet. If unavailable we'll fall back.
@@ -99,6 +109,9 @@ app.use('/api/user', globalLimiter, userRoutes);
 // Mount referral routes
 app.use('/api/referral', globalLimiter, referralRoutes);
 
+// Payment routes
+app.use('/api/payment', globalLimiter, paymentRoutes);
+
 // Admin routes
 app.use('/api/admin', globalLimiter, adminRoutes);
 
@@ -128,6 +141,6 @@ if (process.env.NODE_ENV !== 'production') {
 }
 
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
 
 

@@ -11,6 +11,13 @@ router.post('/orders', verifyToken, ordersCtrl.createOrder);
 router.get('/orders', verifyToken, ordersCtrl.getOrders);
 router.delete('/orders/:id', verifyToken, ordersCtrl.deleteOrder);
 
+// Booking and delivery
+router.post('/book-driver', verifyToken, ordersCtrl.bookDriver);
+
+// Location and vehicle services
+router.get('/location-suggestions', verifyToken, ordersCtrl.getLocationSuggestions);
+router.get('/vehicle-types', verifyToken, ordersCtrl.getVehicleTypes);
+
 // Wallet routes removed (wallet functionality deprecated)
 
 // History

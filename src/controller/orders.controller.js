@@ -4,6 +4,71 @@ import admin from '../config/firebase.js';
 const sanitizeString = (v, max = 1000) => (typeof v === 'string' ? v.trim().slice(0, max) : '');
 const sanitizePhone = (v) => (typeof v === 'string' ? v.trim().replace(/[^+0-9]/g, '') : '');
 
+// Vehicle pricing configuration
+const VEHICLE_TYPES = {
+  'Motorbike (Fastest)': {
+    basePrice: 1500,
+    perKmRate: 500,
+    description: 'Fastest delivery option'
+  },
+  'Car (Fragile)': {
+    basePrice: 3500,
+    perKmRate: 1000,
+    description: 'Suitable for fragile items'
+  },
+  'Van (Large Items)': {
+    basePrice: 4000,
+    perKmRate: 2000,
+    description: 'For large and bulky items'
+  }
+};
+
+// Abeokuta area coordinates (approximate center)
+const ABEOKUTA_CENTER = {
+  lat: 7.1475,
+  lng: 3.3619
+};
+
+// Calculate distance between two points using Haversine formula
+const calculateDistance = (lat1, lng1, lat2, lng2) => {
+  const R = 6371; // Earth's radius in kilometers
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLng = (lng2 - lng1) * Math.PI / 180;
+  const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+    Math.sin(dLng/2) * Math.sin(dLng/2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+  return R * c;
+};
+
+// Check if location is within Abeokuta area (approximate 20km radius)
+const isWithinAbeokuta = (lat, lng) => {
+  const distance = calculateDistance(lat, lng, ABEOKUTA_CENTER.lat, ABEOKUTA_CENTER.lng);
+  return distance <= 20; // 20km radius
+};
+
+// Calculate delivery price based on vehicle type and locations
+const calculateDeliveryPrice = (vehicleType, pickupLat, pickupLng, destLat, destLng) => {
+  const vehicle = VEHICLE_TYPES[vehicleType];
+  if (!vehicle) {
+    throw new Error('Invalid vehicle type');
+  }
+
+  // Check if both locations are within Abeokuta
+  const pickupInAbeokuta = isWithinAbeokuta(pickupLat, pickupLng);
+  const destInAbeokuta = isWithinAbeokuta(destLat, destLng);
+
+  if (pickupInAbeokuta && destInAbeokuta) {
+    // Both locations within Abeokuta - use base price
+    return vehicle.basePrice;
+  } else {
+    // At least one location outside Abeokuta - calculate distance-based price
+    const distance = calculateDistance(pickupLat, pickupLng, destLat, destLng);
+    const distancePrice = distance * vehicle.perKmRate;
+    return Math.max(vehicle.basePrice, distancePrice);
+  }
+};
+
 // Create an order for the authenticated user (secure)
 export const createOrder = async (req, res) => {
   try {
@@ -101,8 +166,21 @@ export const bookDriver = async (req, res) => {
       return res.status(429).json({ message: 'Too many booking requests. Please wait a moment.' });
     }
 
-    // Expect fields: pickup, destination, packageDescription, pickupTime, contact, price
-    const { pickup = {}, destination = {}, packageDescription = '', pickupTime = null, contact = {}, price = 0 } = req.body;
+    // Expect fields: pickup, destination, packageDescription, pickupTime, contact, vehicleType, coordinates
+    const {
+      pickup = {},
+      destination = {},
+      packageDescription = '',
+      pickupTime = null,
+      contact = {},
+      vehicleType = 'Motorbike (Fastest)',
+      coordinates = {}
+    } = req.body;
+
+    // Validate vehicle type
+    if (!VEHICLE_TYPES[vehicleType]) {
+      return res.status(400).json({ message: 'Invalid vehicle type selected' });
+    }
 
     // Validate required fields
     const pkg = sanitizeString(packageDescription, 512);
@@ -112,25 +190,66 @@ export const bookDriver = async (req, res) => {
       address: sanitizeString(pickup.address || pickup, 1000),
       contactName: sanitizeString(pickup.contactName || contact.name || '', 128),
       contactPhone: sanitizePhone(pickup.contactPhone || contact.phone || ''),
+      coordinates: {
+        lat: coordinates.pickupLat ? Number(coordinates.pickupLat) : null,
+        lng: coordinates.pickupLng ? Number(coordinates.pickupLng) : null
+      }
     };
+
     const cleanDestination = {
       address: sanitizeString(destination.address || destination, 1000),
       contactName: sanitizeString(destination.contactName || contact.name || '', 128),
       contactPhone: sanitizePhone(destination.contactPhone || contact.phone || ''),
+      coordinates: {
+        lat: coordinates.destLat ? Number(coordinates.destLat) : null,
+        lng: coordinates.destLng ? Number(coordinates.destLng) : null
+      }
     };
 
-    if (!cleanPickup.address || !cleanDestination.address) return res.status(400).json({ message: 'Pickup and destination addresses are required' });
+    if (!cleanPickup.address || !cleanDestination.address) {
+      return res.status(400).json({ message: 'Pickup and destination addresses are required' });
+    }
 
-    const numericPrice = Number(price || 0);
-    if (Number.isNaN(numericPrice) || numericPrice < 0) return res.status(400).json({ message: 'Invalid price' });
+    // Calculate delivery price
+    let deliveryPrice = VEHICLE_TYPES[vehicleType].basePrice; // Default price
+    let distance = 0;
+
+    if (cleanPickup.coordinates.lat && cleanPickup.coordinates.lng &&
+        cleanDestination.coordinates.lat && cleanDestination.coordinates.lng) {
+      try {
+        distance = calculateDistance(
+          cleanPickup.coordinates.lat, cleanPickup.coordinates.lng,
+          cleanDestination.coordinates.lat, cleanDestination.coordinates.lng
+        );
+        deliveryPrice = calculateDeliveryPrice(
+          vehicleType,
+          cleanPickup.coordinates.lat, cleanPickup.coordinates.lng,
+          cleanDestination.coordinates.lat, cleanDestination.coordinates.lng
+        );
+      } catch (error) {
+        console.error('Error calculating delivery price:', error);
+        // Use default price if calculation fails
+      }
+    }
 
     const orderRef = admin.firestore().collection('users').doc(uid).collection('orders').doc();
     const order = {
       id: orderRef.id,
       uid,
       items: [{ name: pkg }],
-      total: numericPrice,
-      metadata: { pickup: cleanPickup, destination: cleanDestination, contact: { name: sanitizeString(contact.name || ''), phone: sanitizePhone(contact.phone || '') }, pickupTime: pickupTime || null },
+      total: deliveryPrice,
+      metadata: {
+        pickup: cleanPickup,
+        destination: cleanDestination,
+        contact: {
+          name: sanitizeString(contact.name || ''),
+          phone: sanitizePhone(contact.phone || '')
+        },
+        pickupTime: pickupTime || null,
+        vehicleType: vehicleType,
+        distance: distance,
+        coordinates: coordinates
+      },
       status: 'pending',
       createdAt: Date.now(),
       type: 'delivery',
@@ -141,37 +260,137 @@ export const bookDriver = async (req, res) => {
 
     try { await userRef.set({ lastOrderAt: Date.now() }, { merge: true }); } catch (e) { console.error('Failed to update user lastOrderAt', e); }
 
-    return res.status(201).json({ success: true, order });
+    return res.status(201).json({
+      success: true,
+      order,
+      pricing: {
+        vehicleType,
+        basePrice: VEHICLE_TYPES[vehicleType].basePrice,
+        calculatedPrice: deliveryPrice,
+        distance: distance,
+        isWithinAbeokuta: cleanPickup.coordinates.lat && cleanDestination.coordinates.lat ?
+          (isWithinAbeokuta(cleanPickup.coordinates.lat, cleanPickup.coordinates.lng) &&
+           isWithinAbeokuta(cleanDestination.coordinates.lat, cleanDestination.coordinates.lng)) : false
+      }
+    });
   } catch (err) {
     console.error('bookDriver error', err);
     return res.status(500).json({ message: 'Could not create delivery request' });
   }
 };
 
-// Delete an order owned by the authenticated user (keeps checks)
+// Get location suggestions using OpenStreetMap Nominatim (free alternative to Google Maps)
+export const getLocationSuggestions = async (req, res) => {
+  try {
+    const { query, countrycodes = 'ng', limit = 5 } = req.query;
+
+    if (!query || query.trim().length < 2) {
+      return res.status(400).json({ message: 'Query must be at least 2 characters long' });
+    }
+
+    // Use OpenStreetMap Nominatim API (free, no API key required)
+    const nominatimUrl = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&countrycodes=${countrycodes}&limit=${limit}&addressdetails=1&extratags=1`;
+
+    const response = await fetch(nominatimUrl, {
+      headers: {
+        'User-Agent': 'ASAP-Logistics-App/1.0'
+      }
+    });
+
+    if (!response.ok) {
+      throw new Error('Failed to fetch location suggestions');
+    }
+
+    const data = await response.json();
+
+    // Transform the response to a cleaner format
+    const suggestions = data.map(item => ({
+      place_id: item.place_id,
+      display_name: item.display_name,
+      address: {
+        house_number: item.address?.house_number || '',
+        road: item.address?.road || '',
+        suburb: item.address?.suburb || '',
+        city: item.address?.city || item.address?.town || item.address?.village || '',
+        state: item.address?.state || '',
+        country: item.address?.country || '',
+        postcode: item.address?.postcode || ''
+      },
+      coordinates: {
+        lat: parseFloat(item.lat),
+        lng: parseFloat(item.lon)
+      },
+      type: item.type,
+      importance: item.importance
+    }));
+
+    return res.status(200).json({
+      success: true,
+      suggestions,
+      query: query.trim()
+    });
+
+  } catch (error) {
+    console.error('Location suggestions error:', error);
+    return res.status(500).json({ message: 'Could not fetch location suggestions' });
+  }
+};
+
+// Get vehicle types and pricing information
+export const getVehicleTypes = async (req, res) => {
+  try {
+    const vehicleTypes = Object.keys(VEHICLE_TYPES).map(key => ({
+      type: key,
+      ...VEHICLE_TYPES[key]
+    }));
+
+    return res.status(200).json({
+      success: true,
+      vehicleTypes
+    });
+  } catch (error) {
+    console.error('Get vehicle types error:', error);
+    return res.status(500).json({ message: 'Could not fetch vehicle types' });
+  }
+};
+
+// Delete an order (only if it's pending and belongs to the user)
 export const deleteOrder = async (req, res) => {
   try {
     const uid = req.user && req.user.uid;
     if (!uid) return res.status(401).json({ message: 'Unauthorized' });
 
     const { id } = req.params;
-    if (!id) return res.status(400).json({ message: 'Order id is required' });
+    if (!id) return res.status(400).json({ message: 'Order ID is required' });
 
-    const orderRef = admin.firestore().collection('users').doc(uid).collection('orders').doc(id);
-    const snap = await orderRef.get();
-    if (!snap.exists) return res.status(404).json({ message: 'Order not found' });
+    const orderRef = admin.firestore().doc(`orders/${id}`);
+    const orderSnap = await orderRef.get();
 
-    // Prevent deleting orders that are already in-progress or completed
-    const order = snap.data();
-    if (order && ['in_transit', 'delivered', 'completed'].includes(order.status)) {
-      return res.status(403).json({ message: 'Cannot delete an order that is already in progress or completed' });
+    if (!orderSnap.exists) {
+      return res.status(404).json({ message: 'Order not found' });
     }
 
+    const orderData = orderSnap.data();
+
+    // Check if the order belongs to the user
+    if (orderData.uid !== uid) {
+      return res.status(403).json({ message: 'You can only delete your own orders' });
+    }
+
+    // Only allow deletion of pending orders
+    if (orderData.status !== 'pending') {
+      return res.status(400).json({ message: 'Only pending orders can be deleted' });
+    }
+
+    // Delete the order
     await orderRef.delete();
 
-    return res.status(200).json({ success: true, id });
-  } catch (err) {
-    console.error('deleteOrder error', err);
+    return res.status(200).json({
+      success: true,
+      message: 'Order deleted successfully'
+    });
+  } catch (error) {
+    console.error('Delete order error:', error);
     return res.status(500).json({ message: 'Could not delete order' });
   }
 };

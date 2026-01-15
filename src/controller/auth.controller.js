@@ -615,9 +615,12 @@ export const adminLogin = async (req, res) => {
       return res.status(400).json({ message: 'Email and password are required' });
     }
 
+    console.log(`[ADMIN LOGIN] Login attempt for email: ${email}`);
+
     // Get user by email
     const usersSnap = await admin.firestore().collection('users').where('email', '==', email).limit(1).get();
     if (usersSnap.empty) {
+      console.warn(`[ADMIN LOGIN] User not found: ${email}`);
       return res.status(401).json({ message: 'Invalid email or password' });
     }
 
@@ -625,20 +628,24 @@ export const adminLogin = async (req, res) => {
     const userData = userDoc.data();
     const uid = userDoc.id;
 
+    console.log(`[ADMIN LOGIN] User found with uid: ${uid}, role: ${userData.role}`);
+
     // Check if user is admin (check role field)
     if (userData.role !== 'admin') {
+      console.warn(`[ADMIN LOGIN] User ${email} (uid: ${uid}) does not have admin role. Role: ${userData.role}`);
       return res.status(403).json({ message: 'Admin access denied' });
     }
 
     // Verify password using bcrypt (same as regular login)
     const passwordHash = userData?.passwordHash;
     if (!passwordHash) {
+      console.warn(`[ADMIN LOGIN] No password hash found for user ${uid}`);
       return res.status(401).json({ message: 'Invalid email or password' });
     }
 
     const passwordMatch = await bcryptjs.compare(password, passwordHash);
     if (!passwordMatch) {
-      console.warn(`[ADMIN LOGIN] Failed admin login attempt for user ${uid}`);
+      console.warn(`[ADMIN LOGIN] Failed admin login attempt for user ${uid} - password mismatch`);
       return res.status(401).json({ message: 'Invalid email or password' });
     }
 
@@ -657,22 +664,28 @@ export const adminLogin = async (req, res) => {
         lastLoginIp: clientIp,
         lastLoginAt: Date.now(),
       }, { merge: true });
+      console.log(`[ADMIN LOGIN] Session token persisted for user ${uid}`);
     } catch (e) {
-      console.error('Failed to persist admin login session', e);
+      console.error('[ADMIN LOGIN] Failed to persist admin login session', e);
     }
 
-    console.log(`✓ [ADMIN LOGIN] Admin logged in: ${email} from IP ${clientIp}`);
+    console.log(`✓ [ADMIN LOGIN] Admin logged in successfully: ${email} (uid: ${uid}) from IP ${clientIp}`);
 
-    return res.status(200).json({
+    // Make sure response explicitly includes admin role
+    const responseData = {
       success: true,
       message: 'Admin login successful',
       token: sessionToken,
       adminToken: sessionToken,
       uid: uid,
-      fullName: userData.fullName,
+      fullName: userData.fullName || 'Admin',
       email: userData.email,
       role: 'admin',
-    });
+    };
+
+    console.log(`[ADMIN LOGIN] Response being sent:`, { ...responseData, token: '***' });
+
+    return res.status(200).json(responseData);
   } catch (err) {
     console.error('[ADMIN LOGIN] Error:', err);
     return res.status(500).json({ message: 'Admin login failed' });

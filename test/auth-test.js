@@ -14,6 +14,7 @@ async function post(path, body) {
   console.log(path, '->', res.status, text);
 }
 
+
 async function run() {
   try {
     // Signup (replace phone/email if already used)

@@ -80,6 +80,6 @@ export const createTransaction = async (req, res) => {
  * Demo middleware for testing without auth
  */
 export const demoAuth = (req, res, next) => {
-  req.user = { uid: 'demoUser123' }; // demo user ID
+  req.user = { uid: 'demoUser123' };
   next();
 };

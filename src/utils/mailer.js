@@ -1,52 +1,108 @@
 import dotenv from 'dotenv';
 import { Resend } from 'resend';
+import nodemailer from 'nodemailer';
 
 dotenv.config();
 
-const { RESEND_API_KEY, RESEND_FROM_EMAIL, NODE_ENV } = process.env;
+const {
+  RESEND_API_KEY,
+  RESEND_FROM_EMAIL,
+  SMTP_HOST,
+  SMTP_PORT,
+  SMTP_USER,
+  SMTP_PASS,
+  EMAIL_FROM,
+  NODE_ENV
+} = process.env;
 
-// Default from email (production should override with verified domain)
-const DEFAULT_FROM_EMAIL = RESEND_FROM_EMAIL || 'noreply@asaplogistics.com.ng';
+// Default from emails
+const DEFAULT_RESEND_FROM_EMAIL = RESEND_FROM_EMAIL || 'noreply@asaplogistics.com.ng';
+const DEFAULT_SMTP_FROM_EMAIL = EMAIL_FROM || 'noreply@asaplogistics.com';
 
 let resend;
-let mailConfigured = false;
+let smtpTransporter;
+let resendConfigured = false;
+let smtpConfigured = false;
 
-// Initialize Resend client
+// ================= RESEND SETUP (FOR OTP) =================
 try {
   if (!RESEND_API_KEY) {
-    const msg = '[Mailer] RESEND_API_KEY not configured in environment.';
-    if (NODE_ENV === 'production') {
-      console.error(msg);
-      throw new Error('RESEND_API_KEY is required in production');
-    } else {
-      console.warn(msg);
-    }
+    console.warn('[Mailer] RESEND_API_KEY not configured - OTP emails will fall back to console');
   } else {
     resend = new Resend(RESEND_API_KEY);
-    mailConfigured = true;
-    console.log('[Mailer] ✓ Resend initialized successfully');
-    console.log(`[Mailer] From email: ${DEFAULT_FROM_EMAIL}`);
+    resendConfigured = true;
+    console.log('[Mailer] ✓ Resend initialized for OTP emails');
   }
 } catch (err) {
-  console.error('[Mailer] Failed to initialize Resend:', err && err.message ? err.message : err);
-  if (NODE_ENV === 'production') {
-    throw err;
-  }
-  // Fallback to console logger in dev
-  resend = {
-    emails: {
-      send: async (msg) => {
-        console.log('\n=== [MAILER FALLBACK - DEV MODE] ===');
-        console.log('From:', msg.from);
-        console.log('To:', msg.to);
-        console.log('Subject:', msg.subject);
+  console.warn('[Mailer] Failed to initialize Resend:', err && err.message ? err.message : err);
+}
+
+// ================= SMTP SETUP (FOR BULK EMAILS) =================
+try {
+  if (!SMTP_HOST || !SMTP_PORT || !SMTP_USER || !SMTP_PASS) {
+    console.warn('[Mailer] SMTP credentials not fully configured - bulk emails will fall back to console');
+    console.log('[Mailer] Required SMTP vars:', {
+      SMTP_HOST: !!SMTP_HOST,
+      SMTP_PORT: !!SMTP_PORT,
+      SMTP_USER: !!SMTP_USER,
+      SMTP_PASS: !!SMTP_PASS,
+    });
+    
+    // Fallback transporter for console logging
+    smtpTransporter = {
+      sendMail: async (mailOptions) => {
+        console.log('\n=== [MAILER FALLBACK - SMTP DEV MODE] ===');
+        console.log('From:', mailOptions.from);
+        console.log('To:', mailOptions.to);
+        console.log('Subject:', mailOptions.subject);
         console.log('---');
-        console.log(msg.text || msg.html);
-        console.log('===================================\n');
-        return Promise.resolve({ fallback: true, id: 'dev-' + Date.now() });
+        console.log(mailOptions.text || mailOptions.html);
+        console.log('========================================\n');
+        return Promise.resolve({ fallback: true, messageId: 'dev-' + Date.now() });
       },
+    };
+    smtpConfigured = false;
+  } else {
+    // Create SMTP transporter
+    smtpTransporter = nodemailer.createTransport({
+      host: SMTP_HOST,
+      port: parseInt(SMTP_PORT, 10),
+      secure: parseInt(SMTP_PORT, 10) === 465,
+      auth: {
+        user: SMTP_USER,
+        pass: SMTP_PASS,
+      },
+    });
+
+    // Verify connection
+    smtpTransporter.verify((error, success) => {
+      if (error) {
+        console.warn('[Mailer] SMTP verification failed:', error.message);
+        smtpConfigured = false;
+      } else {
+        console.log('[Mailer] ✓ SMTP initialized for emails');
+        console.log('[Mailer] SMTP Server:', SMTP_HOST + ':' + SMTP_PORT);
+        console.log('[Mailer] From email:', DEFAULT_SMTP_FROM_EMAIL);
+        smtpConfigured = true;
+      }
+    });
+  }
+} catch (err) {
+  console.warn('[Mailer] Failed to initialize SMTP:', err && err.message ? err.message : err);
+  
+  // Fallback console logger
+  smtpTransporter = {
+    sendMail: async (mailOptions) => {
+      console.log('\n=== [MAILER FALLBACK - SMTP ERROR MODE] ===');
+      console.log('From:', mailOptions.from);
+      console.log('To:', mailOptions.to);
+      console.log('Subject:', mailOptions.subject);
+      console.log('Error: SMTP not configured');
+      console.log('=========================================\n');
+      return Promise.resolve({ fallback: true, messageId: 'dev-' + Date.now() });
     },
   };
+  smtpConfigured = false;
 }
 
 /**
@@ -86,7 +142,7 @@ function getOtpEmailHtml(otp) {
         </div>
         <div class="footer">
           <p>&copy; 2026 ASAP Logistics. All rights reserved.</p>
-          <p><a href="https://asaplogistics.com.ng">Visit our website</a></p>
+          <p><a href="https://asaplogis.netlify.app/">Visit our website</a></p>
         </div>
       </div>
     </body>
@@ -95,14 +151,13 @@ function getOtpEmailHtml(otp) {
 }
 
 /**
- * Send OTP via Resend email API (instant delivery, no SMTP delays)
+ * Send OTP via Resend (for authentication)
  */
 export async function sendOtpByEmail({ to, otp }) {
   if (!to || !otp) {
     throw new Error('Email recipient and OTP are required');
   }
 
-  // Log OTP in console for development/debugging
   console.log(`\n${'='.repeat(50)}`);
   console.log(`[OTP] Sending OTP to: ${to}`);
   console.log(`[OTP] Code: ${otp}`);
@@ -114,22 +169,28 @@ export async function sendOtpByEmail({ to, otp }) {
   const text = `Your 4-digit verification code is: ${otp}\nIt expires in 5 minutes.`;
 
   try {
-    console.log('[Mailer] Attempting to send OTP via Resend:', { to, subject, timestamp: new Date().toISOString(), mailConfigured });
+    console.log('[Mailer] Attempting to send OTP via Resend to:', to);
 
-    // Send via Resend API
+    if (!resendConfigured) {
+      console.log('[Mailer] Resend not configured, logging OTP instead:');
+      console.log('[Mailer] OTP:', otp, 'To:', to);
+      return true;
+    }
+
     const result = await resend.emails.send({
-      from: `ASAP Logistics <${DEFAULT_FROM_EMAIL}>`,
+      from: `ASAP Logistics <${DEFAULT_RESEND_FROM_EMAIL}>`,
       to,
       subject,
       html,
       text,
     });
 
-    if (mailConfigured) {
-      console.log('[Mailer] ✓ OTP email sent successfully via Resend:', { to, messageId: result.id, timestamp: new Date().toISOString() });
-    } else {
-      console.log('[Mailer] [FALLBACK MODE] OTP logged to console (Resend not configured)');
-    }
+    console.log('[Mailer] ✓ OTP email sent successfully via Resend:', {
+      to,
+      messageId: result.id,
+      timestamp: new Date().toISOString(),
+    });
+    
     return true;
   } catch (err) {
     console.error('[Mailer] ✗ Failed to send OTP email:', {
@@ -142,7 +203,7 @@ export async function sendOtpByEmail({ to, otp }) {
 }
 
 /**
- * Send bulk emails to multiple recipients via Resend Batch API with exponential backoff
+ * Send bulk emails via SMTP with sequential sending and rate limiting
  */
 export async function sendBulkEmail({ recipients, subject, html, text }) {
   if (!recipients || !Array.isArray(recipients) || recipients.length === 0) {
@@ -160,7 +221,8 @@ export async function sendBulkEmail({ recipients, subject, html, text }) {
   console.log(`\n${'='.repeat(50)}`);
   console.log(`[Bulk Email] Sending to ${recipients.length} recipients`);
   console.log(`[Bulk Email] Subject: ${subject}`);
-  console.log(`[Bulk Email] Using Batch API (Resend recommended method)`);
+  console.log(`[Bulk Email] Sequential send via SMTP with 500ms delay between emails`);
+  console.log(`[Bulk Email] SMTP Configured: ${smtpConfigured}`);
   console.log(`${'='.repeat(50)}\n`);
 
   const results = {
@@ -168,49 +230,30 @@ export async function sendBulkEmail({ recipients, subject, html, text }) {
     failed: [],
   };
 
-  // Split recipients into batches of 100 (Resend batch API limit)
-  const BATCH_SIZE = 100;
-  const batches = [];
-  for (let i = 0; i < recipients.length; i += BATCH_SIZE) {
-    batches.push(recipients.slice(i, i + BATCH_SIZE));
-  }
-
-  console.log(`[Bulk Email] Splitting into ${batches.length} batch(es) of up to ${BATCH_SIZE} emails`);
-
   /**
-   * Retry function with exponential backoff
+   * Send individual email with exponential backoff retry
    */
-  const sendWithRetry = async (emailDataOrArray, maxRetries = 3) => {
+  const sendWithRetry = async (to, maxRetries = 3) => {
     let lastError;
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
-        // Handle both single email and batch array
-        let result;
-        if (Array.isArray(emailDataOrArray)) {
-          // Batch API call - use resend.batch() method directly
-          result = await resend.batch(emailDataOrArray);
-        } else {
-          // Single email call
-          result = await resend.emails.send(emailDataOrArray);
-        }
+        const mailOptions = {
+          from: `ASAP Logistics <${DEFAULT_SMTP_FROM_EMAIL}>`,
+          to,
+          subject,
+          html,
+          text,
+        };
+
+        const result = await smtpTransporter.sendMail(mailOptions);
         
-        if (result.error) {
-          lastError = result.error;
-          // Check if it's a rate limit error (429)
-          if (result.error.message?.includes('429') || result.error.message?.includes('rate limit')) {
-            const backoffMs = Math.pow(2, attempt - 1) * 1000; // Exponential backoff: 1s, 2s, 4s
-            console.warn(`[Mailer] Rate limited, retrying in ${backoffMs}ms (attempt ${attempt}/${maxRetries})`);
-            await new Promise(resolve => setTimeout(resolve, backoffMs));
-            continue;
-          }
-          throw new Error(result.error.message || 'Unknown error');
-        }
+        console.log(`[Mailer] ✓ Email sent to ${to} (messageId: ${result.messageId})`);
         return result;
       } catch (err) {
         lastError = err;
         if (attempt < maxRetries) {
           const backoffMs = Math.pow(2, attempt - 1) * 1000;
-          console.warn(`[Mailer] Error on attempt ${attempt}, retrying in ${backoffMs}ms:`, err.message);
+          console.warn(`[Mailer] Error sending to ${to} on attempt ${attempt}, retrying in ${backoffMs}ms:`, err.message);
           await new Promise(resolve => setTimeout(resolve, backoffMs));
         }
       }
@@ -219,66 +262,39 @@ export async function sendBulkEmail({ recipients, subject, html, text }) {
   };
 
   try {
-    // Send each batch with rate limit protection
-    for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
-      const batch = batches[batchIndex];
-      console.log(`[Bulk Email] Processing batch ${batchIndex + 1}/${batches.length} (${batch.length} recipients)`);
-
-      // Create email list for this batch
-      const emails = batch.map(to => ({
-        from: `ASAP Logistics <${DEFAULT_FROM_EMAIL}>`,
-        to,
-        subject,
-        html,
-        text,
-      }));
-
+    console.log(`[Bulk Email] Starting sequential send to ${recipients.length} recipients...`);
+    
+    for (let i = 0; i < recipients.length; i++) {
+      const to = recipients[i];
       try {
-        // Send batch via Resend batch API - send array directly, not wrapped in { emails }
-        const batchResult = await sendWithRetry(emails, 3);
-        
-        if (batchResult.data) {
-          // Successful batch send
-          batch.forEach(to => results.sent.push(to));
-          console.log(`[Mailer] ✓ Batch ${batchIndex + 1} sent successfully (${batch.length} emails)`);
-        } else if (batchResult.error) {
-          // Batch level error
-          batch.forEach(to => {
-            results.failed.push({ email: to, error: batchResult.error.message });
-          });
-          console.error(`[Mailer] ✗ Batch ${batchIndex + 1} failed:`, batchResult.error.message);
-        }
+        await sendWithRetry(to, 3);
+        results.sent.push(to);
       } catch (err) {
-        // Individual batch failed
-        batch.forEach(to => {
-          results.failed.push({ email: to, error: err.message });
-        });
-        console.error(`[Mailer] ✗ Batch ${batchIndex + 1} error:`, err.message);
+        results.failed.push({ email: to, error: err.message });
+        console.error(`[Mailer] ✗ Failed to send to ${to}:`, err.message);
       }
-
-      // Add delay between batches to avoid rate limiting
-      if (batchIndex < batches.length - 1) {
-        const delayMs = 500; // 500ms delay between batches
-        console.log(`[Bulk Email] Waiting ${delayMs}ms before next batch...`);
-        await new Promise(resolve => setTimeout(resolve, delayMs));
+      
+      // Add delay between emails to avoid rate limiting (500ms)
+      if (i < recipients.length - 1) {
+        await new Promise(resolve => setTimeout(resolve, 500));
       }
     }
 
     console.log(`\n[Bulk Email] Summary:`);
     console.log(`  - Sent: ${results.sent.length}/${recipients.length}`);
     console.log(`  - Failed: ${results.failed.length}/${recipients.length}`);
-    console.log(`  - Batches processed: ${batches.length}`);
     console.log(`[Bulk Email] Completed at: ${new Date().toISOString()}\n`);
 
     return results;
   } catch (err) {
     console.error('[Mailer] ✗ Bulk email operation failed:', {
       recipientCount: recipients.length,
-      batchCount: batches.length,
       errorMessage: err.message,
       timestamp: new Date().toISOString(),
     });
     throw err;
   }
 }
+
+export default { sendOtpByEmail, sendBulkEmail };
  
