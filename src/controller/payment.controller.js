@@ -69,13 +69,16 @@ export const initiateWalletFunding = async (req, res) => {
     const uid = req.user?.uid;
     if (!uid) return res.status(401).json({ message: 'Unauthorized' });
 
-    // Check if WebSocket is connected
-    const wsClient = wsClients.get(uid);
-    if (!wsClient || wsClient.readyState !== 1) {
-      return res.status(400).json({
-        message: 'WebSocket connection required. Please connect to WebSocket first.',
-        code: 'WEBSOCKET_REQUIRED'
-      });
+    // Check if WebSocket is connected (skip in test mode)
+    const isTestMode = process.env.NODE_ENV !== 'production';
+    if (!isTestMode) {
+      const wsClient = wsClients.get(uid);
+      if (!wsClient || wsClient.readyState !== 1) {
+        return res.status(400).json({
+          message: 'WebSocket connection required. Please connect to WebSocket first.',
+          code: 'WEBSOCKET_REQUIRED'
+        });
+      }
     }
 
     const { amount } = req.body;
@@ -124,20 +127,23 @@ export const initiateWalletFunding = async (req, res) => {
       createdAt: admin.firestore.FieldValue.serverTimestamp()
     });
 
-    // Notify user via WebSocket
-    notifyUser(uid, 'transaction_initiated', {
-      transactionId,
-      type: 'wallet_funding',
-      amount: numericAmount,
-      clientSecret: paymentIntent.client_secret
-    });
+    // Notify user via WebSocket (only if connected)
+    if (!isTestMode) {
+      notifyUser(uid, 'transaction_initiated', {
+        transactionId,
+        type: 'wallet_funding',
+        amount: numericAmount,
+        clientSecret: paymentIntent.client_secret
+      });
+    }
 
     res.status(200).json({
       success: true,
       transactionId,
       hmac,
       clientSecret: paymentIntent.client_secret,
-      message: 'Funding initiated. Complete payment to confirm.'
+      message: 'Funding initiated. Complete payment to confirm.',
+      testMode: isTestMode
     });
   } catch (err) {
     console.error('initiateWalletFunding error:', err);
@@ -151,13 +157,16 @@ export const initiateDeliveryPayment = async (req, res) => {
     const uid = req.user?.uid;
     if (!uid) return res.status(401).json({ message: 'Unauthorized' });
 
-    // Check if WebSocket is connected
-    const wsClient = wsClients.get(uid);
-    if (!wsClient || wsClient.readyState !== 1) {
-      return res.status(400).json({
-        message: 'WebSocket connection required. Please connect to WebSocket first.',
-        code: 'WEBSOCKET_REQUIRED'
-      });
+    // Check if WebSocket is connected (skip in test mode)
+    const isTestMode = process.env.NODE_ENV !== 'production';
+    if (!isTestMode) {
+      const wsClient = wsClients.get(uid);
+      if (!wsClient || wsClient.readyState !== 1) {
+        return res.status(400).json({
+          message: 'WebSocket connection required. Please connect to WebSocket first.',
+          code: 'WEBSOCKET_REQUIRED'
+        });
+      }
     }
 
     const { deliveryId, amount } = req.body;
@@ -223,20 +232,24 @@ export const initiateDeliveryPayment = async (req, res) => {
       createdAt: admin.firestore.FieldValue.serverTimestamp()
     });
 
-    notifyUser(uid, 'transaction_initiated', {
-      transactionId,
-      type: 'delivery_payment',
-      deliveryId,
-      amount: numericAmount,
-      clientSecret: paymentIntent.client_secret
-    });
+    // Notify user via WebSocket (only if connected)
+    if (!isTestMode) {
+      notifyUser(uid, 'transaction_initiated', {
+        transactionId,
+        type: 'delivery_payment',
+        deliveryId,
+        amount: numericAmount,
+        clientSecret: paymentIntent.client_secret
+      });
+    }
 
     res.status(200).json({
       success: true,
       transactionId,
       hmac,
       clientSecret: paymentIntent.client_secret,
-      message: 'Payment initiated. Complete payment to confirm.'
+      message: 'Payment initiated. Complete payment to confirm.',
+      testMode: isTestMode
     });
   } catch (err) {
     console.error('initiateDeliveryPayment error:', err);
@@ -246,32 +259,57 @@ export const initiateDeliveryPayment = async (req, res) => {
 
 // Stripe webhook handler
 export const stripeWebhook = async (req, res) => {
+  console.log('🔗 WEBHOOK RECEIVED! Processing payment update...');
+  console.log('🔗 Headers:', JSON.stringify(req.headers, null, 2));
+  console.log('🔗 Body length:', req.body?.length || 'unknown');
+
   const sig = req.headers['stripe-signature'];
   let event;
 
-  try {
-    event = stripe.webhooks.constructEvent(req.body, sig, stripeWebhookSecret);
-  } catch (err) {
-    console.error('Webhook signature verification failed:', err.message);
-    return res.status(400).send(`Webhook Error: ${err.message}`);
+  // In test mode or if webhook secret is not properly configured, skip signature verification
+  const isTestMode = stripeWebhookSecret?.includes('whsec_your') || !stripeWebhookSecret || stripeWebhookSecret?.length < 20;
+
+  if (isTestMode) {
+    console.log('🔧 Test mode detected - skipping webhook signature verification');
+    try {
+      const bodyString = req.body.toString('utf8');
+      event = JSON.parse(bodyString);
+      console.log('🔧 Parsed event type:', event.type);
+      console.log('🔧 Full event data:', JSON.stringify(event, null, 2));
+    } catch (err) {
+      console.error('❌ Failed to parse webhook body:', err.message);
+      return res.status(400).send('Invalid webhook body');
+    }
+  } else {
+    try {
+      event = stripe.webhooks.constructEvent(req.body, sig, stripeWebhookSecret);
+    } catch (err) {
+      console.error('❌ Webhook signature verification failed:', err.message);
+      return res.status(400).send(`Webhook Error: ${err.message}`);
+    }
   }
+
+  console.log(`🔗 Processing event: ${event.type} with ID: ${event.id}`);
 
   try {
     // Handle the event
     switch (event.type) {
       case 'payment_intent.succeeded':
+        console.log('✅ Payment succeeded - processing wallet update');
+        console.log('✅ Payment intent data:', JSON.stringify(event.data.object, null, 2));
         await handlePaymentIntentSucceeded(event.data.object);
         break;
       case 'payment_intent.payment_failed':
+        console.log('❌ Payment failed');
         await handlePaymentIntentFailed(event.data.object);
         break;
       default:
-        console.log(`Unhandled event type ${event.type}`);
+        console.log(`⚠️ Unhandled event type ${event.type}`);
     }
 
     res.json({ received: true });
   } catch (err) {
-    console.error('Webhook processing error:', err);
+    console.error('❌ Webhook processing error:', err);
     res.status(500).json({ error: 'Webhook processing failed' });
   }
 };
@@ -279,29 +317,34 @@ export const stripeWebhook = async (req, res) => {
 // Handle successful payment intent
 async function handlePaymentIntentSucceeded(paymentIntent) {
   const { transactionId } = paymentIntent.metadata;
+  console.log(`🎯 Processing successful payment intent: ${paymentIntent.id}`);
+  console.log(`🎯 Transaction ID from metadata: ${transactionId}`);
 
   if (!transactionId) {
-    console.error('No transactionId in payment intent metadata');
+    console.error('❌ No transactionId in payment intent metadata');
     return;
   }
 
   const pendingDoc = await admin.firestore().collection('pendingTransactions').doc(transactionId).get();
   if (!pendingDoc.exists) {
-    console.error('Transaction not found:', transactionId);
+    console.error('❌ Transaction not found in pendingTransactions:', transactionId);
     return;
   }
 
+  console.log('✅ Found pending transaction, decrypting data...');
   const { data: encryptedData } = pendingDoc.data();
   const transactionData = decryptData(encryptedData);
+  console.log('✅ Decrypted transaction data:', { uid: transactionData.uid, type: transactionData.type, amount: transactionData.amount });
 
   // Check if already processing
   const lockAcquired = await acquireProcessingLock(transactionId);
   if (!lockAcquired) {
-    console.log('Transaction already processing:', transactionId);
+    console.log('⚠️ Transaction already processing:', transactionId);
     return;
   }
 
   try {
+    console.log('🚀 Calling processSuccessfulPayment...');
     await processSuccessfulPayment(transactionData, {
       paymentIntentId: paymentIntent.id,
       amount: paymentIntent.amount / 100, // Convert from cents
@@ -310,6 +353,7 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
 
     // Remove pending transaction
     await admin.firestore().collection('pendingTransactions').doc(transactionId).delete();
+    console.log('✅ Pending transaction removed, wallet update complete');
   } finally {
     await releaseProcessingLock(transactionId);
   }
@@ -340,26 +384,35 @@ async function handlePaymentIntentFailed(paymentIntent) {
 }
 
 // Process successful payment
-async function processSuccessfulPayment(transactionData, gatewayData) {
+export async function processSuccessfulPayment(transactionData, gatewayData) {
   const { uid, type, amount, deliveryId } = transactionData;
+
+  console.log(`🔄 Processing successful payment: ${type} for user ${uid}, amount: ${amount}`);
 
   const userRef = admin.firestore().doc(`users/${uid}`);
 
   await admin.firestore().runTransaction(async (t) => {
+    console.log(`🔍 Fetching user document for ${uid}...`);
     const userSnap = await t.get(userRef);
     const userData = userSnap.data() || {};
     const currentBalance = userData.wallet?.balance || 0;
 
+    console.log(`📊 Current user data:`, { exists: userSnap.exists, currentBalance, accountLevel: userData.accountLevel });
+
     if (type === 'wallet_funding') {
       const newBalance = currentBalance + amount;
       const upgradeThreshold = 50000; // Configure as needed
-      const shouldUpgrade = newBalance >= upgradeThreshold && !userData.accountLevel === 'premium';
+      const shouldUpgrade = newBalance >= upgradeThreshold && userData.accountLevel !== 'premium';
+
+      console.log(`💰 Updating wallet balance: ${currentBalance} → ${newBalance} for user ${uid}`);
 
       t.update(userRef, {
         'wallet.balance': newBalance,
         'wallet.lastUpdated': admin.firestore.FieldValue.serverTimestamp(),
         ...(shouldUpgrade && { accountLevel: 'premium', upgradedAt: admin.firestore.FieldValue.serverTimestamp() })
       });
+
+      console.log(`✅ Wallet update transaction prepared`);
 
       // Log transaction
       t.set(admin.firestore().collection('transactions').doc(), {
@@ -370,6 +423,7 @@ async function processSuccessfulPayment(transactionData, gatewayData) {
         timestamp: admin.firestore.FieldValue.serverTimestamp()
       });
 
+      console.log(`✅ Wallet funded successfully: +₦${amount} for user ${uid}`);
       notifyUser(uid, 'wallet_funded', { amount, newBalance, ...(shouldUpgrade && { upgraded: true }) });
     } else if (type === 'delivery_payment') {
       if (currentBalance < amount) {
@@ -397,9 +451,12 @@ async function processSuccessfulPayment(transactionData, gatewayData) {
         timestamp: admin.firestore.FieldValue.serverTimestamp()
       });
 
+      console.log(`✅ Delivery payment processed: -₦${amount} for delivery ${deliveryId}`);
       notifyUser(uid, 'delivery_paid', { deliveryId, amount, newBalance });
     }
   });
+
+  console.log(`🎉 Payment processing complete for ${type}`);
 }
 
 // Process failed payment
@@ -408,6 +465,62 @@ async function processFailedPayment(transactionData) {
 
   notifyUser(uid, 'payment_failed', { transactionId, type });
 }
+
+// Manually update wallet balance for testing (only in development)
+export const manualWalletUpdate = async (req, res) => {
+  try {
+    const uid = req.user?.uid;
+    if (!uid) return res.status(401).json({ message: 'Unauthorized' });
+
+    // Only allow in development mode
+    if (process.env.NODE_ENV === 'production') {
+      return res.status(403).json({ message: 'This endpoint is only available in development mode' });
+    }
+
+    const { transactionId, amount } = req.body;
+
+    if (!transactionId || !amount || amount <= 0) {
+      return res.status(400).json({ message: 'Invalid transactionId or amount' });
+    }
+
+    // Check if transaction exists and belongs to user
+    const pendingDoc = await admin.firestore().collection('pendingTransactions').doc(transactionId).get();
+    if (!pendingDoc.exists) {
+      return res.status(404).json({ message: 'Transaction not found' });
+    }
+
+    const { data: encryptedData } = pendingDoc.data();
+    const transactionData = decryptData(encryptedData);
+
+    if (transactionData.uid !== uid || transactionData.type !== 'wallet_funding') {
+      return res.status(403).json({ message: 'Access denied' });
+    }
+
+    // Manually process the payment
+    await processSuccessfulPayment(transactionData, {
+      paymentIntentId: `manual_${transactionId}`,
+      amount: amount,
+      currency: 'usd'
+    });
+
+    // Remove pending transaction
+    await admin.firestore().collection('pendingTransactions').doc(transactionId).delete();
+
+    // Get updated user profile
+    const userRef = admin.firestore().doc(`users/${uid}`);
+    const userSnap = await userRef.get();
+    const userData = userSnap.data();
+
+    res.status(200).json({
+      success: true,
+      message: 'Wallet manually updated',
+      newBalance: userData?.wallet?.balance || 0
+    });
+  } catch (err) {
+    console.error('Manual wallet update error:', err);
+    res.status(500).json({ message: 'Failed to update wallet' });
+  }
+};
 
 // Get transaction status (for client polling if needed)
 export const getTransactionStatus = async (req, res) => {

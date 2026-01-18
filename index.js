@@ -61,8 +61,20 @@ if (helmetPkg) app.use(helmetPkg());
 if (xssPkg) app.use(xssPkg());
 if (hppPkg) app.use(hppPkg());
 
-// Logging (only in development)
-if (process.env.NODE_ENV !== 'production' && morganPkg) app.use(morganPkg('dev'));
+// Logging (always enabled for request monitoring)
+if (morganPkg) {
+  app.use(morganPkg(':method :url :status :response-time ms - :res[content-length]'));
+} else {
+  // Fallback logging if morgan is not available
+  app.use((req, res, next) => {
+    const start = Date.now();
+    res.on('finish', () => {
+      const duration = Date.now() - start;
+      console.log(`${req.method} ${req.url} ${res.statusCode} ${duration}ms`);
+    });
+    next();
+  });
+}
 
 app.use(cors({ 
   origin: [

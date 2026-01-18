@@ -10,8 +10,13 @@ if (!stripeSecretKey) {
   throw new Error('STRIPE_SECRET_KEY must be set in environment variables');
 }
 
-if (!stripeWebhookSecret) {
-  throw new Error('STRIPE_WEBHOOK_SECRET must be set in environment variables');
+// Webhook secret is optional for test mode
+if (!stripeWebhookSecret && !stripeSecretKey.startsWith('sk_test_')) {
+  throw new Error('STRIPE_WEBHOOK_SECRET must be set in environment variables for live mode');
+}
+
+if (!stripeWebhookSecret && stripeSecretKey.startsWith('sk_test_')) {
+  console.warn('⚠️ STRIPE_WEBHOOK_SECRET not set - webhook signature verification will be skipped in test mode');
 }
 
 const stripe = new Stripe(stripeSecretKey);
