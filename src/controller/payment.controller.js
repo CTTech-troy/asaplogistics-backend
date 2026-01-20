@@ -46,13 +46,21 @@ export const getWebSocketToken = async (req, res) => {
       { expiresIn: '5m' }
     );
 
-    const wsUrl =
-      process.env.NODE_ENV === 'production'
-        ? `wss://asaplogistics-backend.onrender.com?token=${wsToken}`
-        : `ws://localhost:5000?token=${wsToken}`;
+    // Build WebSocket URL dynamically based on request
+    let wsUrl;
+    if (process.env.NODE_ENV === 'production') {
+      // Use the same host as the API request came from
+      const protocol = req.secure || req.headers['x-forwarded-proto'] === 'https' ? 'wss' : 'ws';
+      const host = req.headers.host || process.env.BACKEND_URL || 'asaplogistics-backend.onrender.com';
+      wsUrl = `${protocol}://${host}?token=${wsToken}`;
+    } else {
+      wsUrl = `ws://localhost:5000?token=${wsToken}`;
+    }
 
+    console.log(`[WebSocket] Generated URL: ${wsUrl.split('?')[0]}...`);
     res.json({ success: true, wsToken, wsUrl });
   } catch (err) {
+    console.error('[WebSocket] Token generation error:', err);
     res.status(500).json({ message: 'Failed to generate WebSocket token' });
   }
 };

@@ -215,6 +215,143 @@ export const decryptContactMessage = async (req, res) => {
   }
 };
 
+// Admin: delete a user and all their associated data
+export const deleteUser = async (req, res) => {
+  try {
+    const { uid } = req.params;
+    if (!uid) return res.status(400).json({ message: 'Missing uid' });
+
+    // Verify user exists
+    const userRef = admin.firestore().doc(`users/${uid}`);
+    const userSnap = await userRef.get();
+    if (!userSnap.exists) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    const userData = userSnap.data();
+    console.log(`[ADMIN] Starting deletion of user ${uid} (${userData?.email || 'unknown'})`);
+
+    try {
+      // Delete all user's orders
+      const ordersSnap = await userRef.collection('orders').get();
+      console.log(`[ADMIN] Deleting ${ordersSnap.size} orders for user ${uid}`);
+      const batch1 = admin.firestore().batch();
+      ordersSnap.forEach(doc => {
+        batch1.delete(doc.ref);
+      });
+      if (ordersSnap.size > 0) await batch1.commit();
+
+      // Delete all user's transactions
+      const transactionsSnap = await userRef.collection('transactions').get();
+      console.log(`[ADMIN] Deleting ${transactionsSnap.size} transactions for user ${uid}`);
+      const batch2 = admin.firestore().batch();
+      transactionsSnap.forEach(doc => {
+        batch2.delete(doc.ref);
+      });
+      if (transactionsSnap.size > 0) await batch2.commit();
+
+      // Delete all user's payment history
+      const paymentSnap = await userRef.collection('paymentHistory').get();
+      console.log(`[ADMIN] Deleting ${paymentSnap.size} payment history entries for user ${uid}`);
+      const batch3 = admin.firestore().batch();
+      paymentSnap.forEach(doc => {
+        batch3.delete(doc.ref);
+      });
+      if (paymentSnap.size > 0) await batch3.commit();
+
+      // Delete the user document from Firebase Authentication if possible
+      try {
+        await admin.auth().deleteUser(uid);
+        console.log(`[ADMIN] Deleted user from Firebase Auth: ${uid}`);
+      } catch (authErr) {
+        console.warn(`[ADMIN] Could not delete user from Auth (may not exist): ${uid}`, authErr.message);
+      }
+
+      // Delete the user document from Firestore
+      await userRef.delete();
+      console.log(`[ADMIN] Successfully deleted user ${uid} and all associated data`);
+
+      // Broadcast log
+      broadcastServerLog(`✅ Admin deleted user: ${uid} (${userData?.email || 'unknown'})`);
+
+      return res.status(200).json({
+        success: true,
+        message: 'User and all associated data deleted successfully',
+        deletedUser: {
+          uid,
+          email: userData?.email,
+          fullName: userData?.fullName
+        }
+      });
+    } catch (deleteErr) {
+      console.error(`[ADMIN] Error during user deletion process: ${uid}`, deleteErr);
+      broadcastServerLog(`❌ Error deleting user ${uid}: ${deleteErr.message}`);
+      throw deleteErr;
+    }
+  } catch (err) {
+    console.error('deleteUser error', err);
+    return res.status(500).json({ message: 'Could not delete user: ' + (err?.message || 'Unknown error') });
+  }
+};
+
+// Admin: delete a specific order
+export const deleteOrder = async (req, res) => {
+  try {
+    const { uid, orderId } = req.params;
+    if (!uid || !orderId) {
+      return res.status(400).json({ message: 'Missing uid or orderId' });
+    }
+
+    // Get order reference
+    const orderRef = admin.firestore().collection('users').doc(uid).collection('orders').doc(orderId);
+    const orderSnap = await orderRef.get();
+
+    if (!orderSnap.exists) {
+      return res.status(404).json({ message: 'Order not found' });
+    }
+
+    const orderData = orderSnap.data();
+    console.log(`[ADMIN] Deleting order ${orderId} for user ${uid}`);
+
+    try {
+      // Delete order
+      await orderRef.delete();
+
+      // Delete related order history if exists
+      try {
+        const historyRef = admin.firestore().collection('users').doc(uid).collection('history').doc(orderId);
+        await historyRef.delete();
+      } catch (historyErr) {
+        console.warn(`[ADMIN] Could not delete order history: ${orderId}`, historyErr.message);
+      }
+
+      console.log(`[ADMIN] Successfully deleted order ${orderId} for user ${uid}`);
+
+      // Broadcast log
+      broadcastServerLog(`✅ Admin deleted order: ${orderId} for user ${uid}`);
+
+      return res.status(200).json({
+        success: true,
+        message: 'Order deleted successfully',
+        deletedOrder: {
+          orderId,
+          uid,
+          status: orderData?.status,
+          total: orderData?.total,
+          createdAt: orderData?.createdAt
+        }
+      });
+    } catch (deleteErr) {
+      console.error(`[ADMIN] Error during order deletion: ${orderId}`, deleteErr);
+      broadcastServerLog(`❌ Error deleting order ${orderId}: ${deleteErr.message}`);
+      throw deleteErr;
+    }
+  } catch (err) {
+    console.error('deleteOrder error', err);
+    return res.status(500).json({ message: 'Could not delete order: ' + (err?.message || 'Unknown error') });
+  }
+};
+
 // Admin: send email to multiple users
 export const sendEmailToUsers = async (req, res) => {
   try {
@@ -260,5 +397,73 @@ export const sendEmailToUsers = async (req, res) => {
   } catch (err) {
     console.error('[ADMIN] sendEmailToUsers error:', err);
     return res.status(500).json({ message: 'Failed to send email: ' + (err?.message || 'Unknown error') });
+  }
+};
+
+// Admin: add money to user's wallet
+export const addMoneyToWallet = async (req, res) => {
+  try {
+    const { uid } = req.params;
+    const { amount } = req.body;
+
+    if (!uid) {
+      return res.status(400).json({ message: 'User ID is required' });
+    }
+
+    if (!amount || isNaN(amount) || amount <= 0) {
+      return res.status(400).json({ message: 'Valid amount greater than 0 is required' });
+    }
+
+    const userRef = admin.firestore().collection('users').doc(uid);
+    const userDoc = await userRef.get();
+
+    if (!userDoc.exists) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    const userData = userDoc.data();
+    const currentBalance = userData.wallet?.balance || 0;
+    const newBalance = currentBalance + parseFloat(amount);
+
+    // Update wallet balance
+    await userRef.update({
+      'wallet.balance': newBalance,
+      'wallet.lastUpdatedAt': new Date().toISOString(),
+    });
+
+    // Log transaction in history/audit trail if exists
+    const historyRef = userRef.collection('walletHistory').doc();
+    await historyRef.set({
+      type: 'admin_credit',
+      amount: parseFloat(amount),
+      previousBalance: currentBalance,
+      newBalance: newBalance,
+      description: 'Manual credit by admin',
+      createdAt: new Date().toISOString(),
+    });
+
+    // Notify user via WebSocket if they're connected
+    await notifyUser(uid, {
+      type: 'wallet_balance_update',
+      balance: newBalance,
+      amount: parseFloat(amount),
+      message: `Your wallet has been credited with ₦${parseFloat(amount).toLocaleString()}`,
+    });
+
+    console.log(`[ADMIN] Added ₦${amount} to user ${uid}'s wallet. New balance: ₦${newBalance}`);
+
+    // Return updated user data
+    const updatedUserDoc = await userRef.get();
+    return res.status(200).json({
+      success: true,
+      message: 'Money added successfully',
+      user: {
+        uid: updatedUserDoc.id,
+        ...updatedUserDoc.data(),
+      },
+    });
+  } catch (err) {
+    console.error('[ADMIN] addMoneyToWallet error:', err);
+    return res.status(500).json({ message: 'Failed to add money to wallet: ' + (err?.message || 'Unknown error') });
   }
 };

@@ -6,7 +6,10 @@ const router = express.Router();
 
 router.get('/orders', verifyToken, isAdmin, adminCtrl.listOrders);
 router.patch('/orders/:uid/:orderId', verifyToken, isAdmin, adminCtrl.updateOrderStatus);
+router.delete('/orders/:uid/:orderId', verifyToken, isAdmin, adminCtrl.deleteOrder);
 router.get('/users', verifyToken, isAdmin, adminCtrl.listUsers);
+router.delete('/users/:uid', verifyToken, isAdmin, adminCtrl.deleteUser);
+router.post('/users/:uid/wallet/add', verifyToken, isAdmin, adminCtrl.addMoneyToWallet);
 router.get('/referral-stats', verifyToken, isAdmin, adminCtrl.getReferralStats);
 router.get('/contacts', verifyToken, isAdmin, adminCtrl.listContacts);
 router.delete('/contacts/:contactId', verifyToken, isAdmin, adminCtrl.deleteContact);
