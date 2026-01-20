@@ -2,6 +2,7 @@ import express from 'express';
 import { verifyToken } from '../middleware/auth.middleware.js';
 import {
   getWebSocketToken,
+  getSystemInfo,
   initiateWalletFunding,
   initiateDeliveryPayment,
   opayWebhook,
@@ -23,6 +24,9 @@ router.use(verifyToken);
 
 // Get WebSocket authentication token
 router.get('/ws-token', getWebSocketToken);
+
+// Get system info (admin only)
+router.get('/system-info', getSystemInfo);
 
 // Initiate wallet funding
 router.post('/wallet/fund', initiateWalletFunding);

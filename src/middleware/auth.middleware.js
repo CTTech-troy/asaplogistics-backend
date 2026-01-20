@@ -27,13 +27,6 @@ export async function verifyToken(req, res, next) {
           console.warn('[AUTH] Checking if token format is correct - should start with "sess_"');
           // Debug: try to find any user with this token to see if it exists at all
           const allUsersSnap = await usersRef.get();
-          const tokensInDb = allUsersSnap.docs
-            .map(d => ({ 
-              uid: d.id, 
-              session: (d.data().currentSession || '').substring(0, 20) 
-            }))
-            .filter(u => u.session);
-          console.log('[AUTH] Sessions in database:', tokensInDb);
           return res.status(401).json({ message: 'Invalid session' });
         }
         

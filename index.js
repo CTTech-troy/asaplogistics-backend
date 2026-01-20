@@ -10,7 +10,7 @@ import adminRoutes from './src/router/admin.route.js';
 import contactRoutes from './src/router/contact.route.js';
 import referralRoutes from './src/router/referral.route.js';
 import paymentRoutes from './src/router/payment.route.js';
-import { handleWebSocketConnection, notifyAdmins } from './src/controller/payment.controller.js';
+import { handleWebSocketConnection, broadcastServerLog } from './src/controller/payment.controller.js';
 
 dotenv.config();
 
@@ -22,22 +22,22 @@ const originalInfo = console.info;
 
 console.log = (...args) => {
   originalLog(...args);
-  notifyAdmins('log', { level: 'log', message: args.join(' '), timestamp: new Date().toISOString() });
+  broadcastServerLog(`[LOG] ${args.join(' ')}`);
 };
 
 console.error = (...args) => {
   originalError(...args);
-  notifyAdmins('log', { level: 'error', message: args.join(' '), timestamp: new Date().toISOString() });
+  broadcastServerLog(`[ERROR] ${args.join(' ')}`);
 };
 
 console.warn = (...args) => {
   originalWarn(...args);
-  notifyAdmins('log', { level: 'warn', message: args.join(' '), timestamp: new Date().toISOString() });
+  broadcastServerLog(`[WARN] ${args.join(' ')}`);
 };
 
 console.info = (...args) => {
   originalInfo(...args);
-  notifyAdmins('log', { level: 'info', message: args.join(' '), timestamp: new Date().toISOString() });
+  broadcastServerLog(`[INFO] ${args.join(' ')}`);
 };
 
 // Handle uncaught exceptions and unhandled rejections

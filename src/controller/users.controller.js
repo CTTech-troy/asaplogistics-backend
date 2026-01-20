@@ -1,4 +1,5 @@
 import admin from '../config/firebase.js';
+import { broadcastServerLog } from './payment.controller.js';
 
 // Return the Firestore user document for the authenticated user (safe fields only)
 export const getProfile = async (req, res) => {

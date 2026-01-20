@@ -6,6 +6,31 @@ import crypto from 'crypto';
 
 const db = admin.database();
 const wsClients = new Map();
+const adminSubscribers = new Set(); // Track admin clients subscribed to logs
+
+/* =======================================================
+   BROADCAST SERVER LOGS
+======================================================= */
+export function broadcastServerLog(message) {
+  const logEntry = {
+    event: 'server-log',
+    data: {
+      timestamp: new Date().toISOString(),
+      message
+    }
+  };
+  
+  adminSubscribers.forEach(client => {
+    if (client.readyState === 1) { // OPEN
+      try {
+        client.send(JSON.stringify(logEntry));
+      } catch (err) {
+        console.error('Failed to broadcast log:', err);
+        adminSubscribers.delete(client);
+      }
+    }
+  });
+}
 
 /* =======================================================
    WEBSOCKET TOKEN
@@ -281,7 +306,10 @@ export async function handleWebSocketConnection(ws, req) {
     console.log(`✅ WebSocket: User ${uid} connected`);
 
     const userSnap = await admin.firestore().doc(`users/${uid}`).get();
-    if (userSnap.data()?.accountLevel === 'admin') ws.isAdmin = true;
+    if (userSnap.data()?.accountLevel === 'admin') {
+      ws.isAdmin = true;
+      console.log(`👑 WebSocket: Admin ${uid} connected`);
+    }
 
     wsClients.set(uid, ws);
 
@@ -293,13 +321,30 @@ export async function handleWebSocketConnection(ws, req) {
     ws.on('close', () => {
       console.log(`🔌 WebSocket: User ${uid} disconnected`);
       wsClients.delete(uid);
+      // Remove from log subscribers if admin
+      if (ws.isAdmin) {
+        adminSubscribers.delete(ws);
+      }
     });
 
     ws.on('message', async (msg) => {
       try {
         const data = JSON.parse(msg);
-        if (data.type === 'api_request') {
-          console.log(`📨 WebSocket API request: ${data.endpoint}`);
+        
+        // Handle streaming events
+        if (data.event === 'subscribe-logs') {
+          console.log(`📡 Admin subscribing to logs`);
+          adminSubscribers.add(ws);
+          return;
+        } else if (data.event === 'unsubscribe-logs') {
+          console.log(`🛑 Admin unsubscribing from logs`);
+          adminSubscribers.delete(ws);
+          return;
+        }
+        
+        // Handle REST API requests
+        if (data.endpoint && data.method && data.token) {
+          console.log(`📨 WebSocket API request: ${data.method} ${data.endpoint}`);
           await handleWebSocketAPIRequest(ws, uid, data);
         }
       } catch (err) {
@@ -317,10 +362,14 @@ export async function handleWebSocketConnection(ws, req) {
    WS API ROUTER
 ======================================================= */
 async function handleWebSocketAPIRequest(ws, uid, request) {
-  const { requestId, endpoint, method, body } = request;
+  const { requestId, endpoint, method, token, body } = request;
+  
+  // Parse body if it's a string
+  const parsedBody = body ? (typeof body === 'string' ? JSON.parse(body) : body) : {};
+  
   console.log(`🔄 Processing API request [${requestId}]: ${method} ${endpoint}`);
 
-  const mockReq = { user: { uid }, body: body || {}, params: {}, method: method || 'GET' };
+  const mockReq = { user: { uid }, body: parsedBody, params: {}, method: method || 'GET' };
 
   const mockRes = {
     status: (code) => ({
