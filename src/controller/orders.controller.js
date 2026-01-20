@@ -143,7 +143,10 @@ export const getOrders = async (req, res) => {
     if (!uid) return res.status(401).json({ message: 'Unauthorized' });
 
     const snap = await admin.firestore().collection('users').doc(uid).collection('orders').orderBy('createdAt', 'desc').limit(100).get();
-    const orders = snap.docs.map(d => d.data());
+    const orders = snap.docs.map(d => ({
+      id: d.id,
+      ...d.data()
+    }));
     return res.status(200).json({ success: true, orders });
   } catch (err) {
     console.error('getOrders error', err);
@@ -232,6 +235,55 @@ export const bookDriver = async (req, res) => {
       }
     }
 
+    // Check user's wallet balance
+    const walletBalance = userData?.wallet?.balance ? Number(userData.wallet.balance) : 0;
+
+    if (walletBalance < deliveryPrice) {
+      return res.status(400).json({ 
+        message: 'Please top up your wallet',
+        requiredAmount: deliveryPrice,
+        currentBalance: walletBalance
+      });
+    }
+
+    // Deduct amount from wallet and create transaction
+    let orderStatus = 'pending';
+    
+    try {
+      await admin.firestore().runTransaction(async (transaction) => {
+        const userSnap = await transaction.get(userRef);
+        const currentData = userSnap.exists ? userSnap.data() : {};
+        const currentBalance = currentData?.wallet?.balance ? Number(currentData.wallet.balance) : 0;
+        
+        if (currentBalance < deliveryPrice) {
+          throw new Error('Insufficient funds');
+        }
+        
+        const newBalance = currentBalance - deliveryPrice;
+        
+        // Create wallet transaction
+        const txRef = userRef.collection('wallet').doc();
+        const txDoc = {
+          id: txRef.id,
+          uid,
+          amount: deliveryPrice,
+          type: 'debit',
+          note: `Delivery booking - ${pkg}`,
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        };
+        
+        // Update wallet balance and save transaction
+        transaction.set(txRef, txDoc);
+        transaction.set(userRef, { wallet: { balance: newBalance } }, { merge: true });
+        
+        // Set order status to pending since payment is successful
+        orderStatus = 'pending';
+      });
+    } catch (error) {
+      console.error('Wallet transaction error:', error);
+      return res.status(400).json({ message: 'Payment failed. Please try again.' });
+    }
+
     const orderRef = admin.firestore().collection('users').doc(uid).collection('orders').doc();
     const order = {
       id: orderRef.id,
@@ -250,10 +302,11 @@ export const bookDriver = async (req, res) => {
         distance: distance,
         coordinates: coordinates
       },
-      status: 'pending',
+      status: orderStatus,
       createdAt: Date.now(),
       type: 'delivery',
       booking: true,
+      paid: true,
     };
 
     await orderRef.set(order);

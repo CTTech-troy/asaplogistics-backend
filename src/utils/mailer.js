@@ -297,4 +297,48 @@ export async function sendBulkEmail({ recipients, subject, html, text }) {
 }
 
 export default { sendOtpByEmail, sendBulkEmail };
+
+// Generic email sending function
+export async function sendEmail({ to, subject, html, text }) {
+  try {
+    // Try SMTP first if configured
+    if (smtpConfigured && smtpTransporter) {
+      const result = await smtpTransporter.sendMail({
+        from: DEFAULT_SMTP_FROM_EMAIL,
+        to,
+        subject,
+        html,
+        text
+      });
+      console.log(`[Mailer] ✓ Email sent via SMTP to ${to} (messageId: ${result.messageId})`);
+      return result;
+    }
+
+    // Fallback to Resend if configured
+    if (resendConfigured && resend) {
+      const result = await resend.emails.send({
+        from: DEFAULT_RESEND_FROM_EMAIL,
+        to: [to],
+        subject,
+        html,
+        text
+      });
+      console.log(`[Mailer] ✓ Email sent via Resend to ${to} (id: ${result.data?.id})`);
+      return result;
+    }
+
+    // Fallback to console logging in development
+    console.log(`[Mailer] 📧 Email would be sent to ${to}:`);
+    console.log(`Subject: ${subject}`);
+    console.log(`HTML: ${html}`);
+    console.log(`Text: ${text}`);
+    console.log(`[Mailer] ⚠️ No email service configured - email logged to console only`);
+
+    return { messageId: 'console-logged', logged: true };
+
+  } catch (error) {
+    console.error(`[Mailer] ✗ Failed to send email to ${to}:`, error);
+    throw error;
+  }
+}
  

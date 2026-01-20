@@ -1,6 +1,7 @@
 import admin from '../config/firebase.js';
 import { decryptToUTF8 } from '../utils/crypto.js';
 import { sendBulkEmail } from '../utils/mailer.js';
+import { notifyUser } from './payment.controller.js';
 
 // Admin: list recent orders across all users (collectionGroup)
 export const listOrders = async (req, res) => {
@@ -8,7 +9,10 @@ export const listOrders = async (req, res) => {
     // Prefer collectionGroup for performance when supported
     try {
       const snap = await admin.firestore().collectionGroup('orders').orderBy('createdAt', 'desc').limit(200).get();
-      const orders = snap.docs.map(d => d.data());
+      const orders = snap.docs.map(d => ({
+        id: d.id,
+        ...d.data()
+      }));
       return res.status(200).json({ success: true, orders });
     } catch (cgErr) {
       // Some Firestore setups (Datastore mode or restricted projects) may not support collectionGroup queries.
@@ -20,7 +24,10 @@ export const listOrders = async (req, res) => {
       const promises = [];
       usersSnap.forEach(userDoc => {
         const p = admin.firestore().collection('users').doc(userDoc.id).collection('orders').get()
-          .then(s => s.docs.map(d => d.data()).forEach(o => orders.push(o)))
+          .then(s => s.docs.map(d => ({
+            id: d.id,
+            ...d.data()
+          })).forEach(o => orders.push(o)))
           .catch(e => console.warn('Failed to fetch orders for user', userDoc.id, e && e.message));
         promises.push(p);
       });
@@ -52,6 +59,19 @@ export const updateOrderStatus = async (req, res) => {
     if (note) updates.note = note;
 
     await orderRef.set(updates, { merge: true });
+
+    // Notify user via WebSocket about order status update
+    try {
+      notifyUser(uid, 'order_status_update', {
+        orderId,
+        status,
+        assignedDriver,
+        note,
+        updatedAt: updates.updatedAt
+      });
+    } catch (wsErr) {
+      console.warn('Failed to send WebSocket notification for order update:', wsErr);
+    }
 
     // Optionally notify user via updating their root doc flag
     try {

@@ -10,9 +10,46 @@ import adminRoutes from './src/router/admin.route.js';
 import contactRoutes from './src/router/contact.route.js';
 import referralRoutes from './src/router/referral.route.js';
 import paymentRoutes from './src/router/payment.route.js';
-import { handleWebSocketConnection } from './src/controller/payment.controller.js';
+import { handleWebSocketConnection, notifyAdmins } from './src/controller/payment.controller.js';
 
 dotenv.config();
+
+// Override console methods to send logs to admin WebSocket clients
+const originalLog = console.log;
+const originalError = console.error;
+const originalWarn = console.warn;
+const originalInfo = console.info;
+
+console.log = (...args) => {
+  originalLog(...args);
+  notifyAdmins('log', { level: 'log', message: args.join(' '), timestamp: new Date().toISOString() });
+};
+
+console.error = (...args) => {
+  originalError(...args);
+  notifyAdmins('log', { level: 'error', message: args.join(' '), timestamp: new Date().toISOString() });
+};
+
+console.warn = (...args) => {
+  originalWarn(...args);
+  notifyAdmins('log', { level: 'warn', message: args.join(' '), timestamp: new Date().toISOString() });
+};
+
+console.info = (...args) => {
+  originalInfo(...args);
+  notifyAdmins('log', { level: 'info', message: args.join(' '), timestamp: new Date().toISOString() });
+};
+
+// Handle uncaught exceptions and unhandled rejections
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught Exception:', err);
+  // Exit the process after logging
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+});
 
 const app = express();
 const server = createServer(app);

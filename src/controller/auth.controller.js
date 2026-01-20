@@ -200,13 +200,13 @@ export const signup = async (req, res) => {
       res.status(201).json({
         success: true,
         message: emailSent ? "Signup successful. OTP sent to your email." : "Signup successful but email could not be sent. Check console for OTP.",
-        uid: user.uid,
+        //uid: user.uid,
         email: email,
         emailSent: emailSent,
-        showSignupFlow: appSettings.showSignupFlow !== false,
-        signUpNewUsers: appSettings.signUpNewUsers !== false,
+        //showSignupFlow: appSettings.showSignupFlow !== false,
+        //signUpNewUsers: appSettings.signUpNewUsers !== false,
         // Include OTP in dev mode for testing/development
-        otp: process.env.NODE_ENV === 'development' ? otp : undefined,
+        //otp: process.env.NODE_ENV === 'development' ? otp : undefined,
       });
     } catch (authErr) {
       // Handle specific Firebase Auth errors
@@ -347,7 +347,8 @@ export const loginWithPassword = async (req, res) => {
     const passwordHash = userData?.passwordHash;
 
     if (!passwordHash) {
-      return res.status(401).json({ message: 'Invalid phone number or password' });
+      console.warn(`[LOGIN PASSWORD] User ${uid} does not have a password set.`);
+      return res.status(400).json({ message: 'Password not set for this account. Please use phone login with OTP instead.' });
     }
 
     // Verify password using bcrypt
@@ -903,5 +904,141 @@ export const seedAdmin = async (req, res) => {
   } catch (err) {
     console.error('[SEED ADMIN] Error:', err);
     return res.status(500).json({ success: false, message: 'Seed failed' });
+  }
+};
+
+// ================= FORGOT PASSWORD =================
+
+// Forgot password - send reset link
+export const forgotPassword = async (req, res) => {
+  try {
+    const { email } = req.body;
+
+    if (!email) {
+      return res.status(400).json({ message: 'Email is required' });
+    }
+
+    // Find user by email
+    const usersRef = admin.firestore().collection('users');
+    const userQuery = await usersRef.where('email', '==', email).limit(1).get();
+
+    if (userQuery.empty) {
+      return res.status(404).json({
+        success: false,
+        message: 'Email not found. Would you like to join our family?',
+        action: 'signup'
+      });
+    }
+
+    const userDoc = userQuery.docs[0];
+    const userData = userDoc.data();
+    const uid = userDoc.id;
+
+    // Generate reset token
+    const resetToken = makeDebugId();
+    const resetExpires = Date.now() + (15 * 60 * 1000); // 15 minutes
+
+    // Store reset token in user document
+    await admin.firestore().doc(`users/${uid}`).set({
+      resetToken,
+      resetTokenExpires: resetExpires
+    }, { merge: true });
+
+    // Send reset email
+    const resetUrl = `${process.env.FRONTEND_URL || 'http://localhost:5173'}/reset-password?token=${resetToken}`;
+
+    const emailHtml = `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+        <h2 style="color: #333;">Reset Your Password</h2>
+        <p>Hello ${userData.fullName || 'User'},</p>
+        <p>You requested a password reset for your ASAP Logistics account.</p>
+        <p>Click the link below to reset your password:</p>
+        <p style="margin: 20px 0;">
+          <a href="${resetUrl}" style="background-color: #007bff; color: white; padding: 12px 24px; text-decoration: none; border-radius: 4px; display: inline-block;">Reset Password</a>
+        </p>
+        <p>This link will expire in 15 minutes.</p>
+        <p>If you didn't request this reset, please ignore this email.</p>
+        <p>Best regards,<br>ASAP Logistics Team</p>
+      </div>
+    `;
+
+    // Import mailer function
+    const { sendEmail } = await import('../utils/mailer.js');
+
+    await sendEmail({
+      to: email,
+      subject: 'Reset Your ASAP Logistics Password',
+      html: emailHtml
+    });
+
+    // Log the email sent to console
+    console.log(`Password reset email sent to: ${email}`);
+    console.log(`Reset URL: ${resetUrl}`);
+
+    res.status(200).json({
+      success: true,
+      message: 'Password reset link has been sent to your email.'
+    });
+
+  } catch (error) {
+    console.error('Forgot password error:', error);
+    res.status(500).json({ message: 'Failed to process password reset request' });
+  }
+};
+
+// Reset password with token
+export const resetPassword = async (req, res) => {
+  try {
+    const { token, newPassword, confirmPassword } = req.body;
+
+    if (!token || !newPassword || !confirmPassword) {
+      return res.status(400).json({ message: 'Token, new password, and confirmation are required' });
+    }
+
+    if (newPassword !== confirmPassword) {
+      return res.status(400).json({ message: 'Passwords do not match' });
+    }
+
+    if (newPassword.length < 8) {
+      return res.status(400).json({ message: 'Password must be at least 8 characters long' });
+    }
+
+    // Find user with this reset token
+    const usersRef = admin.firestore().collection('users');
+    const userQuery = await usersRef.where('resetToken', '==', token).limit(1).get();
+
+    if (userQuery.empty) {
+      return res.status(400).json({ message: 'Invalid or expired reset token' });
+    }
+
+    const userDoc = userQuery.docs[0];
+    const userData = userDoc.data();
+    const uid = userDoc.id;
+
+    // Check if token is expired
+    if (!userData.resetTokenExpires || Date.now() > userData.resetTokenExpires) {
+      return res.status(400).json({ message: 'Reset token has expired' });
+    }
+
+    // Hash new password
+    const saltRounds = 10;
+    const hashedPassword = await bcryptjs.hash(newPassword, saltRounds);
+
+    // Update user password and clear reset token
+    await admin.firestore().doc(`users/${uid}`).set({
+      password: hashedPassword,
+      resetToken: null,
+      resetTokenExpires: null,
+      updatedAt: new Date()
+    }, { merge: true });
+
+    res.status(200).json({
+      success: true,
+      message: 'Password has been reset successfully'
+    });
+
+  } catch (error) {
+    console.error('Reset password error:', error);
+    res.status(500).json({ message: 'Failed to reset password' });
   }
 };

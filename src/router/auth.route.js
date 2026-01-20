@@ -11,6 +11,8 @@ import {
   getAppSettings,
   updateAppSettings,
   seedAdmin,
+  forgotPassword,
+  resetPassword,
 } from "../controller/auth.controller.js";
 import { verifyToken } from "../middleware/auth.middleware.js";
 
@@ -23,6 +25,8 @@ router.post("/verify-otp", verifyOtp);
 router.post("/verify-otp-or-code", verifyOtpOrCode);
 router.post("/signup-bulk", signupBulk);
 router.post("/admin-login", adminLogin);
+router.post("/forgot-password", forgotPassword);
+router.post("/reset-password", resetPassword);
 router.get("/me", verifyToken, getCurrentUser);
 
 // Settings routes
