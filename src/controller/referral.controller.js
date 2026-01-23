@@ -79,7 +79,7 @@ export const getMyReferral = async (req, res) => {
     }
 
     // Construct referral link
-    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
+    const frontendUrl = process.env.FRONTEND_URL;
     const referralLink = `${frontendUrl}/signup?ref=${referralCode}`;
 
     res.status(200).json({

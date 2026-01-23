@@ -49,15 +49,26 @@ export const getWebSocketToken = async (req, res) => {
     // Build WebSocket URL dynamically based on request
     let wsUrl;
     if (process.env.NODE_ENV === 'production') {
-      // Use the same host as the API request came from
+      // For Render.com and other hosting platforms
       const protocol = req.secure || req.headers['x-forwarded-proto'] === 'https' ? 'wss' : 'ws';
-      const host = req.headers.host || process.env.BACKEND_URL || 'asaplogistics-backend.onrender.com';
+
+      // Priority: RENDER_EXTERNAL_URL > BACKEND_URL > request host > fallback
+      let host = process.env.RENDER_EXTERNAL_URL ||
+                 process.env.BACKEND_URL ||
+                 req.headers.host ||
+                 'asaplogistics-backend.onrender.com';
+
+      // Remove protocol from host if present
+      host = host.replace(/^https?:\/\//, '');
+
       wsUrl = `${protocol}://${host}?token=${wsToken}`;
+
+      console.log(`[WebSocket] Production mode detected`);
+      console.log(`[WebSocket] Protocol: ${protocol}, Host: ${host}`);
     } else {
       wsUrl = `ws://localhost:5000?token=${wsToken}`;
+      console.log(`[WebSocket] Development mode: using localhost:5000`);
     }
-
-    console.log(`[WebSocket] Generated URL: ${wsUrl.split('?')[0]}...`);
     res.json({ success: true, wsToken, wsUrl });
   } catch (err) {
     console.error('[WebSocket] Token generation error:', err);
@@ -338,6 +349,12 @@ export async function handleWebSocketConnection(ws, req) {
     ws.on('message', async (msg) => {
       try {
         const data = JSON.parse(msg);
+        
+        // Handle heartbeat ping
+        if (data.type === 'ping') {
+          ws.send(JSON.stringify({ type: 'pong' }));
+          return;
+        }
         
         // Handle streaming events
         if (data.event === 'subscribe-logs') {

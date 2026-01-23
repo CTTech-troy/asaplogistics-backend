@@ -14,6 +14,9 @@ import { handleWebSocketConnection, broadcastServerLog } from './src/controller/
 
 dotenv.config();
 
+// Log environment for debugging
+console.log(`🚀 Starting server in ${process.env.NODE_ENV || 'development'} mode`);
+
 // Override console methods to send logs to admin WebSocket clients
 const originalLog = console.log;
 const originalError = console.error;
