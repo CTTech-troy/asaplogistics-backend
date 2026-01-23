@@ -944,7 +944,7 @@ export const forgotPassword = async (req, res) => {
       resetToken,
       resetTokenExpires: resetExpires
     }, { merge: true });
-
+ 
     // Send reset email
     const resetUrl = `${process.env.FRONTEND_URL}/reset-password?token=${resetToken}`;
 
