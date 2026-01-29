@@ -125,7 +125,7 @@ export const signup = async (req, res) => {
           lastLoginAt: Date.now(),
           role: userRole,
         }, { merge: true });
-        if (userRole === 'admin') {
+        if (userRole === 'user') {
           console.log(`✓ [SIGNUP] Admin account created: ${email}`);
         }
       } catch (fsErr) {

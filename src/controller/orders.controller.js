@@ -35,10 +35,10 @@ const calculateDistance = (lat1, lng1, lat2, lng2) => {
   const R = 6371; // Earth's radius in kilometers
   const dLat = (lat2 - lat1) * Math.PI / 180;
   const dLng = (lng2 - lng1) * Math.PI / 180;
-  const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+  const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
     Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
-    Math.sin(dLng/2) * Math.sin(dLng/2);
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+    Math.sin(dLng / 2) * Math.sin(dLng / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   return R * c;
 };
 
@@ -99,12 +99,12 @@ export const createOrder = async (req, res) => {
     const meta = {};
     if (metadata.pickup) meta.pickup = {
       address: sanitizeString(String(metadata.pickup.address || metadata.pickup)),
-      contactName: sanitizeString(metadata.pickup.contactName || '' , 128),
+      contactName: sanitizeString(metadata.pickup.contactName || '', 128),
       contactPhone: sanitizePhone(metadata.pickup.contactPhone || metadata.pickup.phone || ''),
     };
     if (metadata.destination) meta.destination = {
       address: sanitizeString(String(metadata.destination.address || metadata.destination)),
-      contactName: sanitizeString(metadata.destination.contactName || '' , 128),
+      contactName: sanitizeString(metadata.destination.contactName || '', 128),
       contactPhone: sanitizePhone(metadata.destination.contactPhone || metadata.destination.phone || ''),
     };
 
@@ -170,7 +170,7 @@ export const bookDriver = async (req, res) => {
       return res.status(429).json({ message: 'Too many booking requests. Please wait a moment.' });
     }
 
-    // Expect fields: pickup, destination, packageDescription, pickupTime, contact, vehicleType, coordinates
+    // Expect fields: pickup, destination, packageDescription, pickupTime, contact, vehicleType, coordinates, type...
     const {
       pickup = {},
       destination = {},
@@ -178,8 +178,17 @@ export const bookDriver = async (req, res) => {
       pickupTime = null,
       contact = {},
       vehicleType = 'Motorbike (Fastest)',
-      coordinates = {}
+      coordinates = {},
+      type = 'delivery', // Default to 'delivery'
+      serviceType = '',
+      duration = '',
+      details = ''
     } = req.body;
+
+    // Validate order type
+    if (!['delivery', 'driver_booking'].includes(type)) {
+      return res.status(400).json({ message: 'Invalid order type' });
+    }
 
     // Validate vehicle type
     if (!VEHICLE_TYPES[vehicleType]) {
@@ -219,7 +228,7 @@ export const bookDriver = async (req, res) => {
     let distance = 0;
 
     if (cleanPickup.coordinates.lat && cleanPickup.coordinates.lng &&
-        cleanDestination.coordinates.lat && cleanDestination.coordinates.lng) {
+      cleanDestination.coordinates.lat && cleanDestination.coordinates.lng) {
       try {
         distance = calculateDistance(
           cleanPickup.coordinates.lat, cleanPickup.coordinates.lng,
@@ -239,50 +248,55 @@ export const bookDriver = async (req, res) => {
     // Check user's wallet balance
     const walletBalance = userData?.wallet?.balance ? Number(userData.wallet.balance) : 0;
 
-    if (walletBalance < deliveryPrice) {
-      return res.status(400).json({ 
-        message: 'Please top up your wallet',
-        requiredAmount: deliveryPrice,
-        currentBalance: walletBalance
-      });
+    // Only check balance and deduct for deliveries
+    if (type === 'delivery') {
+      if (walletBalance < deliveryPrice) {
+        return res.status(400).json({
+          message: 'Please top up your wallet',
+          requiredAmount: deliveryPrice,
+          currentBalance: walletBalance
+        });
+      }
     }
 
-    // Deduct amount from wallet and create transaction
+    // Deduct amount from wallet and create transaction (only for deliveries)
     let orderStatus = 'pending';
-    
-    try {
-      await admin.firestore().runTransaction(async (transaction) => {
-        const userSnap = await transaction.get(userRef);
-        const currentData = userSnap.exists ? userSnap.data() : {};
-        const currentBalance = currentData?.wallet?.balance ? Number(currentData.wallet.balance) : 0;
-        
-        if (currentBalance < deliveryPrice) {
-          throw new Error('Insufficient funds');
-        }
-        
-        const newBalance = currentBalance - deliveryPrice;
-        
-        // Create wallet transaction
-        const txRef = userRef.collection('wallet').doc();
-        const txDoc = {
-          id: txRef.id,
-          uid,
-          amount: deliveryPrice,
-          type: 'debit',
-          note: `Delivery booking - ${pkg}`,
-          createdAt: admin.firestore.FieldValue.serverTimestamp(),
-        };
-        
-        // Update wallet balance and save transaction
-        transaction.set(txRef, txDoc);
-        transaction.set(userRef, { wallet: { balance: newBalance } }, { merge: true });
-        
-        // Set order status to pending since payment is successful
-        orderStatus = 'pending';
-      });
-    } catch (error) {
-      console.error('Wallet transaction error:', error);
-      return res.status(400).json({ message: 'Payment failed. Please try again.' });
+
+    if (type === 'delivery') {
+      try {
+        await admin.firestore().runTransaction(async (transaction) => {
+          const userSnap = await transaction.get(userRef);
+          const currentData = userSnap.exists ? userSnap.data() : {};
+          const currentBalance = currentData?.wallet?.balance ? Number(currentData.wallet.balance) : 0;
+
+          if (currentBalance < deliveryPrice) {
+            throw new Error('Insufficient funds');
+          }
+
+          const newBalance = currentBalance - deliveryPrice;
+
+          // Create wallet transaction
+          const txRef = userRef.collection('wallet').doc();
+          const txDoc = {
+            id: txRef.id,
+            uid,
+            amount: deliveryPrice,
+            type: 'debit',
+            note: `Delivery - ${pkg}`,
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+          };
+
+          // Update wallet balance and save transaction
+          transaction.set(txRef, txDoc);
+          transaction.set(userRef, { wallet: { balance: newBalance } }, { merge: true });
+
+          // Set order status to pending since payment is successful
+          orderStatus = 'pending';
+        });
+      } catch (error) {
+        console.error('Wallet transaction error:', error);
+        return res.status(400).json({ message: 'Payment failed. Please try again.' });
+      }
     }
 
     const orderRef = admin.firestore().collection('users').doc(uid).collection('orders').doc();
@@ -301,13 +315,17 @@ export const bookDriver = async (req, res) => {
         pickupTime: pickupTime || null,
         vehicleType: vehicleType,
         distance: distance,
-        coordinates: coordinates
+        coordinates: coordinates,
+        // Store additional driver booking details
+        serviceType: sanitizeString(serviceType),
+        duration: sanitizeString(duration),
+        details: sanitizeString(details)
       },
       status: orderStatus,
       createdAt: Date.now(),
-      type: 'delivery',
+      type: type, // Use dynamic type
       booking: true,
-      paid: true,
+      paid: type === 'delivery', // Only deliveries are paid immediately
     };
 
     await orderRef.set(order);
@@ -324,7 +342,7 @@ export const bookDriver = async (req, res) => {
         distance: distance,
         isWithinAbeokuta: cleanPickup.coordinates.lat && cleanDestination.coordinates.lat ?
           (isWithinAbeokuta(cleanPickup.coordinates.lat, cleanPickup.coordinates.lng) &&
-           isWithinAbeokuta(cleanDestination.coordinates.lat, cleanDestination.coordinates.lng)) : false
+            isWithinAbeokuta(cleanDestination.coordinates.lat, cleanDestination.coordinates.lng)) : false
       }
     });
   } catch (err) {
@@ -417,7 +435,7 @@ export const deleteOrder = async (req, res) => {
     const { id } = req.params;
     if (!id) return res.status(400).json({ message: 'Order ID is required' });
 
-    const orderRef = admin.firestore().doc(`orders/${id}`);
+    const orderRef = admin.firestore().collection('users').doc(uid).collection('orders').doc(id);
     const orderSnap = await orderRef.get();
 
     if (!orderSnap.exists) {
@@ -425,11 +443,6 @@ export const deleteOrder = async (req, res) => {
     }
 
     const orderData = orderSnap.data();
-
-    // Check if the order belongs to the user
-    if (orderData.uid !== uid) {
-      return res.status(403).json({ message: 'You can only delete your own orders' });
-    }
 
     // Only allow deletion of pending orders
     if (orderData.status !== 'pending') {

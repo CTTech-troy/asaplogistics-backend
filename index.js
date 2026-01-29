@@ -171,8 +171,11 @@ app.use('/api/admin', globalLimiter, adminRoutes);
 app.use('/api/contact', globalLimiter, contactRoutes);
 
 app.get('/', (req, res) => {
-  res.send('API running...');
+  res.send('API running on port 5000');
 });
+
+
+// http://localhost:5000/api/contact
 
 // Development-only test endpoint to send a test OTP/email.
 // Dynamic import used so server won't fail on startup if mailer is misconfigured in production.
