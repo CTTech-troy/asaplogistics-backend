@@ -170,7 +170,7 @@ export const bookDriver = async (req, res) => {
       return res.status(429).json({ message: 'Too many booking requests. Please wait a moment.' });
     }
 
-    // Expect fields: pickup, destination, packageDescription, pickupTime, contact, vehicleType, coordinates, type...
+    // Expect fields: pickup, destination, packageDescription, pickupTime, contact, vehicleType, coordinates
     const {
       pickup = {},
       destination = {},
@@ -178,17 +178,8 @@ export const bookDriver = async (req, res) => {
       pickupTime = null,
       contact = {},
       vehicleType = 'Motorbike (Fastest)',
-      coordinates = {},
-      type = 'delivery', // Default to 'delivery'
-      serviceType = '',
-      duration = '',
-      details = ''
+      coordinates = {}
     } = req.body;
-
-    // Validate order type
-    if (!['delivery', 'driver_booking'].includes(type)) {
-      return res.status(400).json({ message: 'Invalid order type' });
-    }
 
     // Validate vehicle type
     if (!VEHICLE_TYPES[vehicleType]) {
@@ -248,55 +239,50 @@ export const bookDriver = async (req, res) => {
     // Check user's wallet balance
     const walletBalance = userData?.wallet?.balance ? Number(userData.wallet.balance) : 0;
 
-    // Only check balance and deduct for deliveries
-    if (type === 'delivery') {
-      if (walletBalance < deliveryPrice) {
-        return res.status(400).json({
-          message: 'Please top up your wallet',
-          requiredAmount: deliveryPrice,
-          currentBalance: walletBalance
-        });
-      }
+    if (walletBalance < deliveryPrice) {
+      return res.status(400).json({
+        message: 'Please top up your wallet',
+        requiredAmount: deliveryPrice,
+        currentBalance: walletBalance
+      });
     }
 
-    // Deduct amount from wallet and create transaction (only for deliveries)
+    // Deduct amount from wallet and create transaction
     let orderStatus = 'pending';
 
-    if (type === 'delivery') {
-      try {
-        await admin.firestore().runTransaction(async (transaction) => {
-          const userSnap = await transaction.get(userRef);
-          const currentData = userSnap.exists ? userSnap.data() : {};
-          const currentBalance = currentData?.wallet?.balance ? Number(currentData.wallet.balance) : 0;
+    try {
+      await admin.firestore().runTransaction(async (transaction) => {
+        const userSnap = await transaction.get(userRef);
+        const currentData = userSnap.exists ? userSnap.data() : {};
+        const currentBalance = currentData?.wallet?.balance ? Number(currentData.wallet.balance) : 0;
 
-          if (currentBalance < deliveryPrice) {
-            throw new Error('Insufficient funds');
-          }
+        if (currentBalance < deliveryPrice) {
+          throw new Error('Insufficient funds');
+        }
 
-          const newBalance = currentBalance - deliveryPrice;
+        const newBalance = currentBalance - deliveryPrice;
 
-          // Create wallet transaction
-          const txRef = userRef.collection('wallet').doc();
-          const txDoc = {
-            id: txRef.id,
-            uid,
-            amount: deliveryPrice,
-            type: 'debit',
-            note: `Delivery - ${pkg}`,
-            createdAt: admin.firestore.FieldValue.serverTimestamp(),
-          };
+        // Create wallet transaction
+        const txRef = userRef.collection('wallet').doc();
+        const txDoc = {
+          id: txRef.id,
+          uid,
+          amount: deliveryPrice,
+          type: 'debit',
+          note: `Delivery booking - ${pkg}`,
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        };
 
-          // Update wallet balance and save transaction
-          transaction.set(txRef, txDoc);
-          transaction.set(userRef, { wallet: { balance: newBalance } }, { merge: true });
+        // Update wallet balance and save transaction
+        transaction.set(txRef, txDoc);
+        transaction.set(userRef, { wallet: { balance: newBalance } }, { merge: true });
 
-          // Set order status to pending since payment is successful
-          orderStatus = 'pending';
-        });
-      } catch (error) {
-        console.error('Wallet transaction error:', error);
-        return res.status(400).json({ message: 'Payment failed. Please try again.' });
-      }
+        // Set order status to pending since payment is successful
+        orderStatus = 'pending';
+      });
+    } catch (error) {
+      console.error('Wallet transaction error:', error);
+      return res.status(400).json({ message: 'Payment failed. Please try again.' });
     }
 
     const orderRef = admin.firestore().collection('users').doc(uid).collection('orders').doc();
@@ -315,17 +301,13 @@ export const bookDriver = async (req, res) => {
         pickupTime: pickupTime || null,
         vehicleType: vehicleType,
         distance: distance,
-        coordinates: coordinates,
-        // Store additional driver booking details
-        serviceType: sanitizeString(serviceType),
-        duration: sanitizeString(duration),
-        details: sanitizeString(details)
+        coordinates: coordinates
       },
       status: orderStatus,
       createdAt: Date.now(),
-      type: type, // Use dynamic type
+      type: 'delivery',
       booking: true,
-      paid: type === 'delivery', // Only deliveries are paid immediately
+      paid: true,
     };
 
     await orderRef.set(order);
@@ -435,7 +417,7 @@ export const deleteOrder = async (req, res) => {
     const { id } = req.params;
     if (!id) return res.status(400).json({ message: 'Order ID is required' });
 
-    const orderRef = admin.firestore().collection('users').doc(uid).collection('orders').doc(id);
+    const orderRef = admin.firestore().doc(`orders/${id}`);
     const orderSnap = await orderRef.get();
 
     if (!orderSnap.exists) {
@@ -443,6 +425,11 @@ export const deleteOrder = async (req, res) => {
     }
 
     const orderData = orderSnap.data();
+
+    // Check if the order belongs to the user
+    if (orderData.uid !== uid) {
+      return res.status(403).json({ message: 'You can only delete your own orders' });
+    }
 
     // Only allow deletion of pending orders
     if (orderData.status !== 'pending') {

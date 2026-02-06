@@ -34,7 +34,7 @@ async function clearOtpForUser(uid) {
 
 // Helper to log full error for developers and send a sanitized message to client
 function makeDebugId() {
-  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2,8)}`;
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
 function logAndRespond(res, err, userMessage = 'An unexpected error occurred', status = 500) {
@@ -65,8 +65,8 @@ export const signup = async (req, res) => {
       }
 
       if (appSettings.signUpNewUsers === false) {
-        return res.status(403).json({ 
-          message: 'New user registration is currently disabled. Please contact support.' 
+        return res.status(403).json({
+          message: 'New user registration is currently disabled. Please contact support.'
         });
       }
     } else {
@@ -88,10 +88,10 @@ export const signup = async (req, res) => {
     }
 
     // Get client IP address for "remember me" feature
-    const clientIp = req.headers['x-forwarded-for']?.split(',')[0].trim() || 
-                     req.socket?.remoteAddress || 
-                     req.connection?.remoteAddress || 
-                     'unknown';
+    const clientIp = req.headers['x-forwarded-for']?.split(',')[0].trim() ||
+      req.socket?.remoteAddress ||
+      req.connection?.remoteAddress ||
+      'unknown';
 
     try {
       const user = await admin.auth().createUser({
@@ -123,11 +123,11 @@ export const signup = async (req, res) => {
           wallet: { balance: 0 },
           createdAt: Date.now(),
           lastLoginAt: Date.now(),
-          role: userRole,
+          role: 'user', // Enforce user role
+          isAdmin: false, // Enforce false
+          isVerified: false, // User must verify OTP
         }, { merge: true });
-        if (userRole === 'user') {
-          console.log(`✓ [SIGNUP] Admin account created: ${email}`);
-        }
+        // Removed admin log check since we are enforcing user role
       } catch (fsErr) {
         console.error('Failed to write user document to Firestore', fsErr);
       }
@@ -198,13 +198,16 @@ export const signup = async (req, res) => {
         appSettings = { showSignupFlow: true };
       }
 
+      console.log('User created:', user.uid); // Debug log
+
       res.status(201).json({
         success: true,
         message: emailSent ? "Signup successful. OTP sent to your email." : "Signup successful but email could not be sent. Check console for OTP.",
         //uid: user.uid,
         email: email,
         emailSent: emailSent,
-        //showSignupFlow: appSettings.showSignupFlow !== false,
+        uid: user.uid, // Explicitly return UID for frontend logic
+        showSignupFlow: appSettings.showSignupFlow !== false,
         //signUpNewUsers: appSettings.signUpNewUsers !== false,
         // Include OTP in dev mode for testing/development
         //otp: process.env.NODE_ENV === 'development' ? otp : undefined,
@@ -238,17 +241,25 @@ export const login = async (req, res) => {
     }
 
     // Get client IP for remember me
-    const clientIp = req.headers['x-forwarded-for']?.split(',')[0].trim() || 
-                     req.socket?.remoteAddress || 
-                     req.connection?.remoteAddress || 
-                     'unknown';
+    const clientIp = req.headers['x-forwarded-for']?.split(',')[0].trim() ||
+      req.socket?.remoteAddress ||
+      req.connection?.remoteAddress ||
+      'unknown';
 
     const user = await admin.auth().getUserByPhoneNumber(phone);
-    
+
     // Check if user is logging in from a trusted IP (remember me feature)
     const userDoc = await admin.firestore().doc(`users/${user.uid}`).get();
     const userData = userDoc.exists ? userDoc.data() : {};
-    
+
+    // Check if user is verified
+    if (userData.isVerified === false) {
+      // Allow login flow to proceed so they can receive OTP and verify? 
+      // Or block them? Usually, login OTP *is* verification.
+      // For phone login, possessing the phone and getting OTP implies verification.
+      // So we can arguably set isVerified=true upon successful login OTP verify.
+    }
+
     if (userData.rememberMe && userData.trustedIps && userData.trustedIps.includes(clientIp)) {
       // Auto-login from trusted IP
       console.log(`✓ [LOGIN] Auto-login from trusted IP ${clientIp} for user ${user.uid}`);
@@ -319,10 +330,10 @@ export const loginWithPassword = async (req, res) => {
     }
 
     // Get client IP for remember me
-    const clientIp = req.headers['x-forwarded-for']?.split(',')[0].trim() || 
-                     req.socket?.remoteAddress || 
-                     req.connection?.remoteAddress || 
-                     'unknown';
+    const clientIp = req.headers['x-forwarded-for']?.split(',')[0].trim() ||
+      req.socket?.remoteAddress ||
+      req.connection?.remoteAddress ||
+      'unknown';
 
     // Get app settings to check if IP verification is required
     let appSettings = {};
@@ -359,10 +370,15 @@ export const loginWithPassword = async (req, res) => {
       return res.status(401).json({ message: 'Invalid phone number or password' });
     }
 
+    // Check if user is verified
+    if (userData.isVerified === false) {
+      return res.status(403).json({ message: 'Account not verified. Please verify your email via OTP code (Login without password to trigger OTP).' });
+    }
+
     // If signups are disabled, enforce IP matching for security
     if (appSettings.signUpNewUsers === false && userData.registeredIp && userData.registeredIp !== clientIp) {
       console.warn(`[LOGIN PASSWORD] IP mismatch for user ${uid}. Registered IP: ${userData.registeredIp}, Current IP: ${clientIp}`);
-      return res.status(403).json({ 
+      return res.status(403).json({
         message: 'Login from different IP address is not allowed. Please contact support.',
         ipMismatch: true
       });
@@ -436,10 +452,10 @@ export const verifyOtpOrCode = async (req, res) => {
     const { idToken, uid, otp } = req.body;
 
     // Get client IP for remember me feature
-    const clientIp = req.headers['x-forwarded-for']?.split(',')[0].trim() || 
-                     req.socket?.remoteAddress || 
-                     req.connection?.remoteAddress || 
-                     'unknown';
+    const clientIp = req.headers['x-forwarded-for']?.split(',')[0].trim() ||
+      req.socket?.remoteAddress ||
+      req.connection?.remoteAddress ||
+      'unknown';
 
     if (idToken) {
       const decodedToken = await admin.auth().verifyIdToken(idToken);
@@ -490,6 +506,7 @@ export const verifyOtpOrCode = async (req, res) => {
             sessionIssuedAt: Date.now(),
             lastLoginIp: clientIp,
             lastLoginAt: Date.now(),
+            isVerified: true, // Mark user as verified
           };
           if (data.rememberMe) {
             const trustedIps = data.trustedIps || [];
@@ -652,10 +669,10 @@ export const adminLogin = async (req, res) => {
     }
 
     // Get client IP address
-    const clientIp = req.headers['x-forwarded-for']?.split(',')[0].trim() || 
-                     req.socket?.remoteAddress || 
-                     req.connection?.remoteAddress || 
-                     'unknown';
+    const clientIp = req.headers['x-forwarded-for']?.split(',')[0].trim() ||
+      req.socket?.remoteAddress ||
+      req.connection?.remoteAddress ||
+      'unknown';
 
     // Create session token (not custom token) for admin
     const sessionToken = `sess_${makeDebugId()}`;
@@ -700,7 +717,7 @@ export const getAppSettings = async (req, res) => {
   try {
     const settingsSnap = await admin.firestore().doc('settings/app').get();
     const settings = settingsSnap.exists ? settingsSnap.data() : { showSignupFlow: true, signUpNewUsers: true };
-    
+
     return res.status(200).json({
       success: true,
       settings: {
@@ -730,11 +747,11 @@ export const updateAppSettings = async (req, res) => {
     if (String(token).startsWith('sess_')) {
       const usersRef = admin.firestore().collection('users');
       const qSnap = await usersRef.where('currentSession', '==', token).limit(1).get();
-      
+
       if (qSnap.empty) {
         return res.status(401).json({ message: 'Unauthorized' });
       }
-      
+
       userDoc = qSnap.docs[0];
       uid = userDoc.id;
     } else {
@@ -747,7 +764,7 @@ export const updateAppSettings = async (req, res) => {
         return res.status(401).json({ message: 'Unauthorized' });
       }
     }
-    
+
     if (!userDoc.exists || userDoc.data().role !== 'admin') {
       return res.status(403).json({ message: 'Forbidden: Admin access required' });
     }
@@ -756,7 +773,7 @@ export const updateAppSettings = async (req, res) => {
 
     // Validate input - at least one setting must be provided
     const updates = {};
-    
+
     if (showSignupFlow !== undefined && typeof showSignupFlow !== 'boolean') {
       return res.status(400).json({ message: 'showSignupFlow must be a boolean' });
     }
@@ -813,7 +830,7 @@ export const getCurrentUser = async (req, res) => {
 
     const userData = userDoc.data();
     console.log('[getCurrentUser] Fetched user:', uid, userData.email);
-    
+
     return res.status(200).json({
       success: true,
       user: {
@@ -840,21 +857,21 @@ export const seedAdmin = async (req, res) => {
     // Only allow in development or if a special seed token is provided
     const seedToken = req.headers['x-seed-token'];
     const isDev = process.env.NODE_ENV === 'development';
-    
+
     if (!isDev && seedToken !== process.env.SEED_TOKEN) {
       return res.status(403).json({ message: 'Unauthorized' });
     }
 
     const adminEmail = 'admin@asaplogis.com';
     const adminPassword = 'admin123';
-    
+
     // Hash the password
     const saltRounds = 10;
     const passwordHash = await bcryptjs.hash(adminPassword, saltRounds);
-    
+
     // Check if admin already exists
     const existingAdmin = await admin.firestore().collection('users').where('email', '==', adminEmail).limit(1).get();
-    
+
     if (!existingAdmin.empty) {
       const docId = existingAdmin.docs[0].id;
       // Update existing admin with password hash
@@ -863,7 +880,7 @@ export const seedAdmin = async (req, res) => {
         role: 'admin',
         updatedAt: Date.now(),
       }, { merge: true });
-      
+
       console.log(`✓ [SEED] Updated existing admin user: ${adminEmail}`);
       return res.status(200).json({
         success: true,
@@ -872,11 +889,11 @@ export const seedAdmin = async (req, res) => {
         uid: docId,
       });
     }
-    
+
     // Create new admin user
     const adminDoc = admin.firestore().collection('users').doc();
     const uid = adminDoc.id;
-    
+
     await adminDoc.set({
       uid,
       email: adminEmail,
@@ -889,9 +906,9 @@ export const seedAdmin = async (req, res) => {
       createdAt: Date.now(),
       updatedAt: Date.now(),
     });
-    
+
     console.log(`✓ [SEED] Created new admin user: ${adminEmail} (${uid})`);
-    
+
     return res.status(201).json({
       success: true,
       message: 'Admin user created successfully',
@@ -944,7 +961,7 @@ export const forgotPassword = async (req, res) => {
       resetToken,
       resetTokenExpires: resetExpires
     }, { merge: true });
- 
+
     // Send reset email
     const resetUrl = `${process.env.FRONTEND_URL}/reset-password?token=${resetToken}`;
 
